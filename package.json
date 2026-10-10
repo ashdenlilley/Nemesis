@@ -1,0 +1,17 @@
+{
+  "name": "nemesis",
+  "version": "0.1.0",
+  "description": "Terminal agentic coding harness: tool-using LLM agent with permissions and resumable sessions",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "nemesis": "bin/nemesis.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node bin/nemesis.js",
+    "test": "node --test \"test/**/*.test.js\""
+  }
+}
