@@ -40,7 +40,7 @@ test('UI with color off emits no escape codes', () => {
   ui.toolResult({ name: 'bash' }, { content: 'ok', isError: false });
   ui.banner({ version: '0.2.0', provider: 'anthropic', model: 'm', cwd: '/w', session: 's1' });
   assert.equal(err.text.includes('\x1b['), false);
-  assert.match(err.text, /⏺ bash\(\{"command":"ls"\}\)/);
+  assert.match(err.text, />_ bash\(\{"command":"ls"\}\)/);
   assert.match(err.text, /Nemesis 0\.2\.0/);
 });
 

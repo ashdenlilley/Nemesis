@@ -1,4 +1,3 @@
-import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -11,6 +10,7 @@ import { Session } from './session.js';
 import { buildSystemPrompt } from './prompt.js';
 import { runAgentTurn } from './agent.js';
 import { createUI } from './ui.js';
+import { createLineReader } from './input.js';
 import { createHooks } from './hooks.js';
 import { startMcpServers } from './mcp/manager.js';
 import { createSubagentRunner, createTaskTool, loadAgentDefs } from './subagents.js';
@@ -259,13 +259,15 @@ async function runRepl(state) {
   ui.info(ui.dim('  /help for commands · Ctrl+C interrupts a running turn · /exit quits'));
 
   while (!state.exit) {
-    let line;
+    let raw;
     try {
       ui.rule();
-      line = (await rl.question(ui.prompt())).trim();
+      raw = await rl.question(ui.prompt());
     } catch {
       break; // input closed
     }
+    ui.submitted();
+    const line = raw.trim();
     if (!line) continue;
 
     if (line.startsWith('/')) {
@@ -302,7 +304,7 @@ export async function main(argv) {
   await loadEnvFile({ home });
 
   const interactive = Boolean(stdin.isTTY && stdout.isTTY);
-  const rl = interactive ? createInterface({ input: stdin, output: stdout }) : null;
+  const rl = interactive ? createLineReader({ input: stdin, output: stdout }) : null;
   const ui = createUI();
   const state = await createState({ args, cwd, home, rl, ui });
 
