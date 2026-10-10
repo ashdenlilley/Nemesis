@@ -1,21 +1,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
-import { createInterface } from 'node:readline/promises';
+import { createLineReader } from '../src/input.js';
 import { askSecret } from '../src/onboarding.js';
 
+// A stdin stand-in that looks like a TTY to the line reader.
+const fakeTTY = () => Object.assign(new PassThrough(), { isTTY: true, setRawMode() {} });
+
 test('askSecret shows the label and does not echo the typed key', async () => {
-  const input = new PassThrough();
+  const input = fakeTTY();
   const chunks = [];
   const output = new PassThrough();
   output.on('data', (c) => chunks.push(c.toString()));
-  const rl = createInterface({ input, output, terminal: true });
-  const sink = { write() {} };
+  const rl = createLineReader({ input, output });
 
-  const pending = askSecret(rl, 'Key: ', sink);
-  input.write('sk-secret-123\r');
+  const pending = askSecret(rl, 'Key: ');
+  input.write('sk-secret-123');
+  input.write('\r');
   const answer = await pending;
-  rl.close();
 
   assert.equal(answer, 'sk-secret-123');
   const shown = chunks.join('');

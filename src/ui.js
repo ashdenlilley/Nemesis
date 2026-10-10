@@ -12,7 +12,37 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
   const paintWith = (open, text) => (level === 'none' || !open ? text : `${open}${text}${RESET}`);
   const paint = (style, text) => paintWith(CODES[style] ?? '', text);
   const accentText = (text) => paintWith(accent + CODES.bold, text);
-  let streaming = false;
+
+  // Layout state. Blocks are user prompts, assistant text, tool activity, and meta lines.
+  // A blank line separates consecutive blocks of different kinds; none goes inside a block.
+  let last = null; // kind of the block last written, or null after a rule
+  let held = ''; // newlines from assistant text, written only if more text follows in the same block
+  let midLine = false; // stdout text is missing its final newline
+
+  const startBlock = (kind, stream) => {
+    if (midLine) {
+      out.write('\n');
+      midLine = false;
+    }
+    if (last !== null && last !== kind) stream.write('\n');
+    if (last !== kind) held = '';
+    last = kind;
+  };
+
+  // Assistant text. Trailing newlines are held back so a block never ends with a blank line.
+  const writeText = (chunk) => {
+    const trailing = /\n*$/.exec(chunk)[0];
+    let core = chunk.slice(0, chunk.length - trailing.length);
+    if (core) {
+      if (last !== 'text') core = core.replace(/^\n+/, '');
+      startBlock('text', out);
+      out.write(held + core);
+      held = '';
+      midLine = true;
+    } else if (last === 'text') {
+      held += trailing;
+    }
+  };
 
   const summarize = (tool, input) => {
     if (tool?.describeCall) return getFirstLine(tool.describeCall(input), 100);
@@ -23,15 +53,23 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
 
   return {
     streamText(delta) {
-      streaming = true;
-      out.write(delta);
+      writeText(delta);
     },
     endStream() {
-      if (streaming) out.write('\n');
-      streaming = false;
+      if (midLine) {
+        out.write('\n');
+        midLine = false;
+      }
+      held = '';
     },
     assistant(text) {
-      out.write(`${text.trimEnd()}\n`);
+      writeText(text.trim());
+      if (midLine) {
+        out.write('\n');
+        midLine = false;
+      }
+      // A following text block in the same response starts after one blank line.
+      held = '\n';
     },
 
     // Logo on the left, session info on the right. Plain title lines if the logo file is missing.
@@ -62,9 +100,11 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
       }
     },
 
-    // Horizontal rule in the accent color, drawn above the prompt.
+    // Dim rule above the prompt. Starts a new block, so the next block follows it without a gap.
     rule() {
-      err.write(`${paintWith(accent, '─'.repeat(width()))}\n`);
+      last = null;
+      held = '';
+      err.write(`${paint('dim', '─'.repeat(width()))}\n`);
     },
 
     // readline prompt string (readline ignores ANSI when measuring width).
@@ -72,25 +112,41 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
       return `${paintWith(accent, '❯')} `;
     },
 
+    // The input box stays on screen after Enter, so this only records the block for spacing.
+    submitted() {
+      last = 'user';
+      held = '';
+      midLine = false;
+    },
+
     // One line under the answer: model, requests, tokens.
     status(text) {
+      startBlock('meta', err);
       err.write(`${paint('dim', `  ${text}`)}\n`);
     },
 
     toolCall(use, tool) {
-      err.write(`${accentText('⏺')} ${use.name}${paint('dim', `(${summarize(tool, use.input)})`)}\n`);
+      startBlock('tool', err);
+      err.write(`${accentText('>_')} ${use.name}${paint('dim', `(${summarize(tool, use.input)})`)}\n`);
     },
     toolResult(use, outcome) {
-      const preview = getFirstLine(outcome.content, 120);
-      err.write(paint(outcome.isError ? 'red' : 'dim', `  ⎿  ${preview}\n`));
+      startBlock('tool', err);
+      const text = String(outcome.content ?? '').trim();
+      const more = text.split('\n').length - 1;
+      const preview = getFirstLine(text, 120);
+      const tail = more > 0 ? ` … +${more} lines` : '';
+      err.write(paint(outcome.isError ? 'red' : 'dim', `  ⎿  ${preview}${tail}\n`));
     },
     info(text) {
+      startBlock('meta', err);
       err.write(`${text}\n`);
     },
     warn(text) {
+      startBlock('meta', err);
       err.write(paint('yellow', `warning: ${text}\n`));
     },
     error(text) {
+      startBlock('meta', err);
       err.write(paint('red', `error: ${text}\n`));
     },
     bold(text) {
@@ -112,10 +168,14 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
         info() {},
         bold: (t) => t,
         toolCall(use, tool) {
-          err.write(`${tag} ${accentText('⏺')} ${use.name}${paint('dim', `(${summarize(tool, use.input)})`)}\n`);
+          startBlock('tool', err);
+          err.write(`${tag} ${accentText('>_')} ${use.name}${paint('dim', `(${summarize(tool, use.input)})`)}\n`);
         },
         toolResult(use, outcome) {
-          if (outcome.isError) err.write(`${tag}   ${paint('red', `⎿  ${getFirstLine(outcome.content, 100)}`)}\n`);
+          if (outcome.isError) {
+            startBlock('tool', err);
+            err.write(`${tag}   ${paint('red', `⎿  ${getFirstLine(outcome.content, 100)}`)}\n`);
+          }
         },
         warn: (t) => err.write(`${tag} ${paint('yellow', `warning: ${t}`)}\n`),
         error: (t) => err.write(`${tag} ${paint('red', `error: ${t}`)}\n`),
