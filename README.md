@@ -17,6 +17,23 @@ nemesis                                      # first run: provider, model, key, 
 
 Do not use `npm install -g nemesis`. The npm registry has an unrelated package with that name.
 
+#### Tarball (private repo, or no GitHub access)
+
+On a machine with the repo:
+
+```sh
+npm pack                                     # writes nemesis-0.3.0.tgz
+```
+
+Send the `.tgz` file to the user. They run:
+
+```sh
+npm install -g ./nemesis-0.3.0.tgz
+nemesis
+```
+
+Requires Node 20+. No git or GitHub access needed. Upgrade by installing the newer `.tgz` the same way.
+
 The first run asks whether to add the npm global bin directory to PATH (Windows: User PATH; POSIX: an `export` line in `~/.zshrc` or `~/.bashrc`). Open a new terminal afterwards.
 
 Re-run key and PATH setup at any time with `nemesis --setup`.
