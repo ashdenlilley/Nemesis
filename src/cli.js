@@ -1,4 +1,4 @@
-import { stdin, stdout } from 'node:process';
+import { stdin, stdout, stderr } from 'node:process';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { loadConfig, nemesisHome, OUTPUT_STYLES, PROVIDERS } from './config.js';
@@ -121,6 +121,7 @@ async function createState({ args, cwd, home, rl, ui }) {
     planMode: Boolean(args.plan),
     exit: false,
     hookContext: [],
+    followUps: [], // prompts queued during a turn, sent after the next tool round
     controller: null,
     permissions: null,
     hooks: null,
@@ -149,7 +150,7 @@ async function createState({ args, cwd, home, rl, ui }) {
   state.permissions = createPermissions({
     policy: effectivePolicy({ config: state.config, planMode: state.planMode, readOnly: args.readOnly }),
     autoApprove: args.yes,
-    prompt: rl ? (q) => rl.question(q) : null,
+    choose: rl ? (spec) => rl.choose(spec) : null,
   });
   state.hooks = createHooks(state.config, { cwd, getSessionId: () => state.session?.id ?? null });
 
@@ -209,6 +210,7 @@ async function runUserTurn(state, text) {
       ctx: { cwd: state.cwd, roots: state.roots, signal: controller.signal, config: state.config, subagents: state.subagents },
       hooks: state.hooks,
       usage: state.usage,
+      takeFollowUps: () => state.followUps.splice(0),
     });
     return true;
   } catch (err) {
@@ -242,6 +244,25 @@ async function runOneShot(state, prompt) {
   return ok;
 }
 
+// Turn with the prompt box kept under the feed: Enter queues a follow-up for the next tool round, Ctrl+C interrupts.
+async function runWatchedTurn(state, text) {
+  state.rl.watch({
+    label: state.ui.prompt(),
+    onSubmit: (typed) => {
+      const queued = typed.trim();
+      if (!queued) return;
+      state.followUps.push(queued);
+      state.ui.queued(queued);
+    },
+    onInterrupt: () => state.controller?.abort(),
+  });
+  try {
+    return await runUserTurn(state, text);
+  } finally {
+    state.rl.unwatch();
+  }
+}
+
 async function runRepl(state) {
   const { rl, ui } = state;
   rl.on('SIGINT', () => {
@@ -258,29 +279,37 @@ async function runRepl(state) {
   });
   ui.info(ui.dim('  /help for commands · Ctrl+C interrupts a running turn · /exit quits'));
 
+  let leftover = null; // follow-ups not consumed by the last turn; they become the next prompt
   while (!state.exit) {
-    let raw;
-    try {
-      ui.rule();
-      raw = await rl.question(ui.prompt());
-    } catch {
-      break; // input closed
-    }
-    ui.submitted();
-    const line = raw.trim();
-    if (!line) continue;
-
-    if (line.startsWith('/')) {
+    let text;
+    if (leftover !== null) {
+      text = leftover;
+      leftover = null;
+    } else {
+      let raw;
       try {
-        const r = await state.registry.dispatch(line);
+        ui.rule();
+        raw = await rl.question(ui.prompt(), { leave: false }); // the box clears on Enter; the feed shows the prompt
+      } catch {
+        break; // input closed
+      }
+      text = raw.trim();
+      if (!text) continue;
+    }
+    ui.userMessage(text);
+
+    if (text.startsWith('/')) {
+      try {
+        const r = await state.registry.dispatch(text);
         if (!r.handled) ui.error(r.error);
-        else if (r.prompt) await runUserTurn(state, r.prompt);
+        else if (r.prompt) await runWatchedTurn(state, r.prompt);
       } catch (err) {
         ui.error(err.message);
       }
       continue;
     }
-    await runUserTurn(state, line);
+    await runWatchedTurn(state, text);
+    if (state.followUps.length) leftover = state.followUps.splice(0).join('\n\n');
   }
   ui.info(`session ${state.session.id} saved to ${state.session.file}`);
 }
@@ -305,7 +334,7 @@ export async function main(argv) {
 
   const interactive = Boolean(stdin.isTTY && stdout.isTTY);
   const rl = interactive ? createLineReader({ input: stdin, output: stdout }) : null;
-  const ui = createUI();
+  const ui = rl ? createUI({ out: rl.wrap(stdout), err: rl.wrap(stderr) }) : createUI();
   const state = await createState({ args, cwd, home, rl, ui });
 
   try {

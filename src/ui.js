@@ -112,11 +112,18 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
       return `${paintWith(accent, '❯')} `;
     },
 
-    // The input box stays on screen after Enter, so this only records the block for spacing.
-    submitted() {
-      last = 'user';
-      held = '';
-      midLine = false;
+    // A submitted prompt, echoed into the feed. Follow-ups sent mid-turn are echoed when they reach the model.
+    userMessage(text) {
+      startBlock('user', err);
+      const [first, ...rest] = text.split('\n');
+      const lines = [`${paintWith(accent, '❯')} ${first}`, ...rest.map((l) => `  ${l}`)];
+      err.write(`${lines.join('\n')}\n`);
+    },
+
+    // A follow-up waiting for the next tool call.
+    queued(text) {
+      startBlock('meta', err);
+      err.write(`${paint('dim', `  queued: ${getFirstLine(text, 100)}`)}\n`);
     },
 
     // One line under the answer: model, requests, tokens.

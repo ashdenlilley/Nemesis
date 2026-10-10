@@ -9,8 +9,8 @@ export function effectivePolicy({ config, planMode = false, readOnly = false }) 
 // Gate every tool call by its risk class.
 //   policy: { read, write, exec } -> 'allow' | 'ask' | 'deny'
 //   rules:  per-tool overrides set via /permissions, take precedence over policy
-//   prompt: async (question) -> answer string, or null when no terminal is attached
-export function createPermissions({ policy, prompt = null, autoApprove = false }) {
+//   choose: async ({ title, options }) -> chosen index (-1 when cancelled), or null when no terminal is attached
+export function createPermissions({ policy, choose = null, autoApprove = false }) {
   let current = { ...policy };
   const rules = new Map();
 
@@ -34,19 +34,20 @@ export function createPermissions({ policy, prompt = null, autoApprove = false }
       if (mode === 'allow') return { allowed: true };
       if (mode === 'deny') return { allowed: false, reason: `${tool.risk} tools are disabled` };
       if (autoApprove) return { allowed: true };
-      if (!prompt) {
+      if (!choose) {
         return { allowed: false, reason: `${tool.name} needs approval; run interactively or pass --yes` };
       }
 
       const summary = tool.describeCall ? tool.describeCall(input) : JSON.stringify(input).slice(0, 120);
-      const answer = String(await prompt(`Allow ${tool.name} (${summary})? [y]es / [n]o / [a]lways: `))
-        .trim()
-        .toLowerCase();
-      if (answer === 'a' || answer === 'always') {
+      const picked = await choose({
+        title: `Allow ${tool.name} (${summary})?`,
+        options: ['Yes', `Yes, and don't ask again for ${tool.name} this session`, 'No'],
+      });
+      if (picked === 1) {
         rules.set(tool.name, 'allow');
         return { allowed: true };
       }
-      if (answer === 'y' || answer === 'yes') return { allowed: true };
+      if (picked === 0) return { allowed: true };
       return { allowed: false, reason: 'denied by user' };
     },
   };

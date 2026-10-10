@@ -64,10 +64,11 @@ function normalizeContent(blocks) {
 }
 
 // One user turn: call the model, run requested tools, repeat until the model stops.
-//   runtime: { provider, config, tools, system, session, permissions, ui, ctx, hooks?, usage?, model?, maxSteps? }
+//   runtime: { provider, config, tools, system, session, permissions, ui, ctx, hooks?, usage?, model?, maxSteps?, takeFollowUps? }
+// takeFollowUps() returns the prompts the user queued during the turn. They join the tool results after each tool round.
 export async function runAgentTurn({
   provider, config, tools, system, session, permissions, ui, ctx,
-  hooks = null, usage = null, model = null, maxSteps,
+  hooks = null, usage = null, model = null, maxSteps, takeFollowUps = null,
 }) {
   const toolMap = new Map(tools.map((t) => [t.name, t]));
   const apiTools = tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
@@ -127,6 +128,9 @@ export async function runAgentTurn({
           is_error: outcome.isError,
         });
       }
+      const followUps = takeFollowUps?.() ?? [];
+      for (const text of followUps) ui.userMessage(text);
+      if (followUps.length) results.push({ type: 'text', text: followUps.join('\n\n') });
       await session.append({ role: 'user', content: results });
     }
     ui.warn(`stopped after ${limit} steps; raise maxSteps or send a follow-up`);

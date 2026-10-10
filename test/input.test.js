@@ -82,3 +82,51 @@ test('line reader refuses non-TTY input instead of hanging', async () => {
   const rl = createLineReader({ input, output: new PassThrough() });
   await assert.rejects(rl.question('> '), /needs a terminal/);
 });
+
+// Fake terminal: records what the reader writes and lets the test press keys.
+const fakeTerminal = () => {
+  const input = new PassThrough();
+  Object.assign(input, { isTTY: true, setRawMode() {} });
+  const chunks = [];
+  const output = { isTTY: true, columns: 40, write: (s) => { chunks.push(s); return true; } };
+  return { input, output, text: () => chunks.join('') };
+};
+
+test('choose: arrow keys and Enter pick an option; Esc cancels with -1', async () => {
+  const term = fakeTerminal();
+  const reader = createLineReader({ input: term.input, output: term.output });
+  const picked = reader.choose({ title: 'Allow?', options: ['Yes', 'Always', 'No'] });
+  term.input.write('\x1b[B');
+  term.input.write('\r');
+  assert.equal(await picked, 1);
+  const cancelled = reader.choose({ title: 'Allow?', options: ['Yes', 'No'] });
+  term.input.write('\x1b');
+  assert.equal(await cancelled, -1);
+});
+
+test('watch: Enter goes to onSubmit and the box stays up; output written through wrap() redraws below it', async () => {
+  const term = fakeTerminal();
+  const reader = createLineReader({ input: term.input, output: term.output });
+  const submitted = [];
+  reader.watch({ label: '> ', onSubmit: (t) => submitted.push(t), onInterrupt: () => {} });
+  term.input.write('later');
+  term.input.write('\r');
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(submitted, ['later']);
+  const feed = reader.wrap({ columns: 40, isTTY: true });
+  feed.write('tool ran\n');
+  reader.unwatch();
+  assert.match(term.text(), /tool ran\n/);
+});
+
+test('question with leave:false clears the box on submit instead of keeping it on screen', async () => {
+  const term = fakeTerminal();
+  const reader = createLineReader({ input: term.input, output: term.output });
+  const answer = reader.question('> ', { leave: false });
+  term.input.write('hi');
+  await new Promise((r) => setImmediate(r));
+  term.input.write('\r');
+  assert.equal(await answer, 'hi');
+  // The box is erased, not left behind: the last drawn box is cleared before the terminal modes reset.
+  assert.match(term.text(), /\x1b\[J\x1b\[\?2004l/);
+});

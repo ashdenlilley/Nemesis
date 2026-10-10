@@ -166,15 +166,33 @@ export function applyInput(st, chunk) {
 }
 
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const newEditor = () => ({ text: '', cur: 0, top: 0, pasting: false });
+const eofError = () => Object.assign(new Error('input closed'), { code: 'EOF' });
 
-// Line reader with the subset of the readline interface the app uses: question, close, on('SIGINT').
+// Terminal input and the live area at the bottom of the screen. The live area is one of:
+//   menu:   choose() options, arrow keys + Enter, or a number key. Esc or Ctrl+C cancels (-1).
+//   line:   question(), a prompt box that resolves with the entered text.
+//   watch:  watch(), a prompt box that stays up during a turn. Each Enter goes to onSubmit.
+// Output goes through wrap(): it clears the live area, writes the text, then redraws the area below it.
 export function createLineReader({ input = process.stdin, output = process.stdout } = {}) {
-  let active = null; // { label, secret, st, resolve, reject }
+  let line = null; // { label, secret, leave, st, resolve, reject }
+  let watching = null; // { label, st, onSubmit, onInterrupt }
+  let menu = null; // { title, options, index, resolve }
+  let shown = null; // { row, saved }: live area on screen; row is the cursor's row inside it
+  let atLineStart = true; // the last text written ended with a newline
+  let attached = false; // raw input listener installed
   let closed = false;
   const cols = () => output.columns || 80;
 
-  const draw = () => {
-    const { label, secret, st } = active;
+  const surface = () => menu ?? line ?? watching;
+
+  // Rows for a surface, the cursor's row and column inside them, and rows below the cursor.
+  function render(s) {
+    if (s.options) {
+      const lines = [s.title, ...s.options.map((opt, i) => (i === s.index ? `\x1b[1m❯ ${i + 1}. ${opt}\x1b[0m` : `  ${i + 1}. ${opt}`))];
+      return { lines, row: 0, col: 0, below: lines.length - 1 };
+    }
+    const { label, secret, st } = s;
     const prefixW = label.replace(ANSI, '').length;
     const width = Math.max(10, cols() - prefixW);
     const { rows, cursorRow, cursorCol } = secret ? layout('', 0, width) : layout(st.text, st.cur, width);
@@ -187,61 +205,164 @@ export function createLineReader({ input = process.stdin, output = process.stdou
     for (let i = start; i < end; i++) lines.push((i === 0 ? label : indent) + (secret ? '' : rows[i]));
     if (end < rows.length) lines.push(dim(`… ${rows.length - end} more below`));
 
-    const curIdx = (start > 0 ? 1 : 0) + cursorRow - start;
-    const below = lines.length - 1 - curIdx;
-    let buf = st.drawn ? `\r${st.row ? `\x1b[${st.row}A` : ''}` : '';
-    buf += '\x1b[J' + lines.join('\r\n');
-    if (below) buf += `\x1b[${below}A`;
-    buf += `\r\x1b[${prefixW + cursorCol + 1}G`;
-    output.write(buf);
-    Object.assign(st, { drawn: true, row: curIdx, below });
-  };
+    const row = (start > 0 ? 1 : 0) + cursorRow - start;
+    return { lines, row, col: prefixW + cursorCol, below: lines.length - 1 - row };
+  }
 
-  // Leave the box on screen, end on a fresh line under it, and hand control back.
-  const finish = (error, value) => {
-    const a = active;
-    active = null;
-    input.off('data', onData);
-    input.setRawMode(false);
-    input.pause();
-    output.write(`${a.st.below ? `\x1b[${a.st.below}B` : ''}\r\n\x1b[?2004l\x1b[<u`);
-    if (error) a.reject(error);
-    else a.resolve(value);
-  };
+  // Clear the live area, write `text` in its place, then draw the current surface below it.
+  function paint(text = '') {
+    let buf = '';
+    if (shown) {
+      buf += `\r${shown.row ? `\x1b[${shown.row}A` : ''}\x1b[J`;
+      if (shown.saved) buf += '\x1b8'; // back to the end of a partial line
+      shown = null;
+    }
+    buf += text;
+    if (text) atLineStart = text.endsWith('\n');
+
+    const s = surface();
+    if (s) {
+      const v = render(s);
+      // Mid-line text: step to a fresh line for the area and remember where the text ended.
+      const saved = !atLineStart;
+      if (saved) buf += '\x1b7\r\n';
+      buf += v.lines.join('\r\n');
+      if (v.below) buf += `\x1b[${v.below}A`;
+      buf += `\r${v.col ? `\x1b[${v.col}C` : ''}`;
+      shown = { row: v.row, saved };
+    }
+    output.write(buf);
+  }
+
+  // Raw input is on only while something is waiting for keys.
+  function updateMode() {
+    const want = Boolean(line || watching || menu);
+    if (want && !attached) {
+      input.setEncoding('utf8');
+      input.setRawMode(true);
+      input.resume();
+      // Kitty keyboard protocol, disambiguate only: Ctrl+Enter and Shift+Enter send distinct codes.
+      // Ctrl+letter keys keep their legacy bytes. Terminals without support ignore it.
+      output.write('\x1b[?2004h\x1b[>1u');
+      input.on('data', onData);
+      attached = true;
+    } else if (!want && attached) {
+      input.off('data', onData);
+      input.setRawMode(false);
+      input.pause();
+      output.write('\x1b[?2004l\x1b[<u');
+      attached = false;
+    }
+  }
+
+  function finishLine(text, error) {
+    const l = line;
+    line = null;
+    // Keep the box on screen after a submit only when asked (setup questions do this).
+    const final = l.leave && !error ? `${render(l).lines.join('\r\n')}\r\n` : '';
+    paint(final);
+    updateMode();
+    if (error) l.reject(error);
+    else l.resolve(text);
+  }
+
+  function settleMenu(index) {
+    const m = menu;
+    menu = null;
+    paint();
+    updateMode();
+    m.resolve(index);
+  }
+
+  function menuKey(chunk) {
+    const m = menu;
+    const n = m.options.length;
+    if (chunk === '\x1b[A' || chunk === '\x1bOA') m.index = (m.index + n - 1) % n;
+    else if (chunk === '\x1b[B' || chunk === '\x1bOB') m.index = (m.index + 1) % n;
+    else if (chunk === '\r' || chunk === '\n') return settleMenu(m.index);
+    else if (/^[1-9]$/.test(chunk) && Number(chunk) <= n) return settleMenu(Number(chunk) - 1);
+    else if (chunk === '\x1b' || chunk === '\x03') return settleMenu(-1);
+    else return;
+    paint();
+  }
 
   function onData(chunk) {
-    const action = applyInput(active.st, chunk);
-    if (action === 'submit') return finish(null, active.st.text);
-    if (action === 'interrupt' || action === 'eof') {
-      const err = new Error('input closed');
-      err.code = 'EOF';
-      return finish(err);
+    if (menu) return menuKey(chunk);
+    if (line) {
+      const action = applyInput(line.st, chunk);
+      if (action === 'submit') return finishLine(line.st.text);
+      if (action === 'interrupt' || action === 'eof') return finishLine(null, eofError());
+      return paint();
     }
-    draw();
+    const w = watching;
+    const action = applyInput(w.st, chunk);
+    if (action === 'submit') {
+      const text = w.st.text;
+      Object.assign(w.st, { text: '', cur: 0, top: 0 });
+      paint();
+      return w.onSubmit(text);
+    }
+    if (action === 'interrupt') return w.onInterrupt();
+    paint();
   }
+
+  // Writable stream stand-in for the UI: keeps the live area below everything written.
+  const wrap = (stream) => ({
+    write(text) {
+      paint(text);
+      return true;
+    },
+    get columns() {
+      return stream.columns;
+    },
+    get isTTY() {
+      return stream.isTTY;
+    },
+  });
 
   return {
     output,
+    wrap,
 
-    // Resolves with the entered text. secret: characters are not drawn.
-    question(label, { secret = false } = {}) {
+    // Resolves with the entered text. secret: characters are not drawn. leave: keep the box on screen.
+    question(label, { secret = false, leave = true } = {}) {
       if (!input.isTTY) return Promise.reject(new Error('line input needs a terminal'));
-      if (closed) return Promise.reject(Object.assign(new Error('input closed'), { code: 'EOF' }));
-      if (active) return Promise.reject(new Error('input is already waiting for a line'));
+      if (closed) return Promise.reject(eofError());
+      if (line || menu) return Promise.reject(new Error('input is already waiting for a line'));
       return new Promise((resolve, reject) => {
-        active = { label, secret, resolve, reject, st: { text: '', cur: 0, top: 0, pasting: false, drawn: false, row: 0, below: 0 } };
-        input.setEncoding('utf8');
-        input.setRawMode(true);
-        input.resume();
-        // Kitty keyboard protocol, disambiguate only: Ctrl+Enter and Shift+Enter send distinct codes.
-        // Ctrl+letter keys keep their legacy bytes. Terminals without support ignore it.
-        output.write('\x1b[?2004h\x1b[>1u');
-        input.on('data', onData);
-        draw();
+        line = { label, secret, leave, resolve, reject, st: newEditor() };
+        paint();
+        updateMode();
       });
     },
 
-    // SIGINT outside a question (a running turn) reaches the process; inside one, Ctrl+C is a key.
+    // Shows numbered options. Resolves with the chosen index, or -1 when cancelled.
+    choose({ title, options }) {
+      if (!input.isTTY) return Promise.reject(new Error('choices need a terminal'));
+      if (closed) return Promise.reject(eofError());
+      return new Promise((resolve) => {
+        menu = { title, options, index: 0, resolve };
+        paint();
+        updateMode();
+      });
+    },
+
+    // Keeps a prompt box up while a turn runs. Enter calls onSubmit(text); Ctrl+C on an empty box calls onInterrupt().
+    watch({ label, onSubmit, onInterrupt }) {
+      if (!input.isTTY) return;
+      watching = { label, st: newEditor(), onSubmit, onInterrupt };
+      paint();
+      updateMode();
+    },
+
+    unwatch() {
+      if (!watching) return;
+      watching = null;
+      paint();
+      updateMode();
+    },
+
+    // SIGINT outside a question (a running turn with no watch box) reaches the process; inside one, Ctrl+C is a key.
     on(event, fn) {
       if (event === 'SIGINT') process.on('SIGINT', fn);
       return this;
@@ -249,10 +370,11 @@ export function createLineReader({ input = process.stdin, output = process.stdou
 
     close() {
       closed = true;
-      if (active) {
-        const err = new Error('input closed');
-        err.code = 'EOF';
-        finish(err);
+      watching = null;
+      if (line) finishLine(null, eofError());
+      else {
+        paint();
+        updateMode();
       }
     },
   };

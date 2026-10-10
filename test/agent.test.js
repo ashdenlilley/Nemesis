@@ -9,7 +9,7 @@ import { Session } from '../src/session.js';
 import { validateInput } from '../src/schema.js';
 
 const silentUI = () => ({
-  assistant() {}, toolCall() {}, toolResult() {}, warn() {}, error() {}, info() {},
+  assistant() {}, toolCall() {}, toolResult() {}, warn() {}, error() {}, info() {}, userMessage() {},
 });
 
 // Scripted provider: returns each queued response in order and records what it was sent.
@@ -82,6 +82,24 @@ test('agent loop: tool_use -> tool_result -> final text', async () => {
   assert.equal(session.messages.at(-1).content[0].text, 'done');
 });
 
+test('follow-ups queued mid-turn join the next tool results, not a new turn', async () => {
+  const session = await newSession();
+  await session.append({ role: 'user', content: 'check it' });
+  const provider = scriptedProvider([
+    { stopReason: 'tool_use', content: [{ type: 'tool_use', id: 't1', name: 'echo', input: { text: 'hi' } }] },
+    { stopReason: 'end_turn', content: [{ type: 'text', text: 'done' }] },
+  ]);
+  const permissions = createPermissions({ policy: { read: 'allow', write: 'deny', exec: 'deny' } });
+  const queue = ['also check the tests'];
+  await runAgentTurn({
+    provider, config: {}, tools: [echoTool], system: 'sys', session, permissions,
+    ui: silentUI(), ctx: { cwd: process.cwd() }, maxSteps: 5, takeFollowUps: () => queue.splice(0),
+  });
+  const sent = provider.calls[1].messages.at(-1).content;
+  assert.equal(sent[0].type, 'tool_result');
+  assert.deepEqual(sent[1], { type: 'text', text: 'also check the tests' });
+});
+
 test('unknown tool and invalid input become error results, not crashes', async () => {
   const toolMap = new Map([[echoTool.name, echoTool]]);
   const permissions = createPermissions({ policy: { read: 'allow', write: 'allow', exec: 'allow' } });
@@ -109,18 +127,27 @@ test('permissions: deny policy blocks, ask without terminal blocks, --yes approv
   assert.equal((await yes.check(writeTool, {})).allowed, true);
 });
 
-test('permissions: prompt answers y / n / a, and a remembers for the session', async () => {
-  const answers = ['n', 'a'];
-  const prompts = [];
+test('permissions: menu picks Yes / Yes-always / No, and always remembers for the session', async () => {
+  const picks = [2, 1];
+  const menus = [];
   const perms = createPermissions({
     policy: { read: 'allow', write: 'ask', exec: 'ask' },
-    prompt: async (q) => { prompts.push(q); return answers.shift(); },
+    choose: async (spec) => { menus.push(spec); return picks.shift(); },
   });
   assert.equal((await perms.check(writeTool, {})).allowed, false);
   assert.equal((await perms.check(writeTool, {})).allowed, true);
   assert.equal((await perms.check(writeTool, {})).allowed, true); // remembered, no prompt
-  assert.equal(prompts.length, 2);
-  assert.match(prompts[0], /Allow put \(thing\)/);
+  assert.equal(menus.length, 2);
+  assert.match(menus[0].title, /Allow put \(thing\)/);
+  assert.equal(menus[0].options.length, 3);
+});
+
+test('permissions: cancelled menu (-1) denies', async () => {
+  const perms = createPermissions({
+    policy: { read: 'allow', write: 'ask', exec: 'ask' },
+    choose: async () => -1,
+  });
+  assert.equal((await perms.check(writeTool, {})).allowed, false);
 });
 
 test('interrupted tool calls are settled so history stays valid', async () => {
