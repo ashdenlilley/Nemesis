@@ -1,19 +1,31 @@
 # Nemesis
 
+<p align="center"><img src="nms_logo.svg" alt="Nemesis" width="360"></p>
+
 Terminal coding agent. The model calls tools (read, edit, search, shell, MCP, sub-agents) in a loop until the task is done. Zero runtime dependencies, Node 20+.
 
 ## Quick start
 
-Install once from the repo, then run `nemesis` from any directory:
+### Install
+
+Requires Node 20+ and git.
 
 ```sh
-npm link                     # registers the nemesis command globally
-nemesis                      # first run: setup prompts for provider, model, key
-nemesis -p "find TODOs in src and summarize"
-npm test
+npm install -g github:ashdenlilley/Nemesis   # installs from GitHub, no clone needed
+nemesis                                      # first run: provider, model, key, then PATH check
 ```
 
-Without `npm link`, run `node bin/nemesis.js` instead.
+Do not use `npm install -g nemesis`. The npm registry has an unrelated package with that name.
+
+The first run asks whether to add the npm global bin directory to PATH (Windows: User PATH; POSIX: an `export` line in `~/.zshrc` or `~/.bashrc`). Open a new terminal afterwards.
+
+Re-run key and PATH setup at any time with `nemesis --setup`.
+
+From a local clone, use `npm link` instead of the GitHub install, or run `node bin/nemesis.js`.
+
+```sh
+npm test
+```
 
 First run without a key shows a short tutorial, then asks:
 

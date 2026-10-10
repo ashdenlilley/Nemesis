@@ -17,6 +17,7 @@ import { createSubagentRunner, createTaskTool, loadAgentDefs } from './subagents
 import { createCommandRegistry, loadCustomCommands } from './commands/index.js';
 import { runOnboarding } from './onboarding.js';
 import { createUsage } from './usage.js';
+import { setupPath } from './path.js';
 import { VERSION } from './version.js';
 
 const HELP = `nemesis ${VERSION} - terminal coding agent
@@ -40,6 +41,7 @@ Options:
   -y, --yes                 auto-approve tools that would prompt
       --read-only           disable write and exec tools
       --plan                start in plan mode
+      --setup               re-run key setup and add nemesis to PATH, then exit
   -h, --help                show help
   -v, --version             show version
 
@@ -64,6 +66,7 @@ export function parseArgs(argv) {
       case '-c': case '--continue': args.continue = true; break;
       case '--read-only': args.readOnly = true; break;
       case '--plan': args.plan = true; break;
+      case '--setup': args.setup = true; break;
       case '--no-stream': args.overrides.stream = false; break;
       case '-p': case '--prompt': args.prompt = take(i++, a); break;
       case '-r': case '--resume': args.resume = take(i++, a); break;
@@ -214,7 +217,13 @@ async function runUserTurn(state, text) {
     return false;
   } finally {
     state.controller = null;
+    state.ui.status(statusLine(state));
   }
+}
+
+function statusLine(state) {
+  const t = state.usage.totals();
+  return `${state.config.provider}/${state.config.model} · ${t.requests} requests · ${t.input + t.output} tokens`;
 }
 
 async function runOneShot(state, prompt) {
@@ -240,13 +249,20 @@ async function runRepl(state) {
     else rl.close();
   });
 
-  ui.info(`nemesis ${VERSION} · ${state.config.provider}/${state.config.model} · session ${state.session.id}`);
-  ui.info('type /help for commands, Ctrl+C interrupts a running turn, /exit quits');
+  ui.banner({
+    version: VERSION,
+    provider: state.config.provider,
+    model: state.config.model,
+    cwd: state.cwd,
+    session: state.session.id,
+  });
+  ui.info(ui.dim('  /help for commands · Ctrl+C interrupts a running turn · /exit quits'));
 
   while (!state.exit) {
     let line;
     try {
-      line = (await rl.question(ui.bold('nemesis> '))).trim();
+      ui.rule();
+      line = (await rl.question(ui.prompt())).trim();
     } catch {
       break; // input closed
     }
@@ -267,6 +283,15 @@ async function runRepl(state) {
   ui.info(`session ${state.session.id} saved to ${state.session.file}`);
 }
 
+// Non-fatal: a PATH problem should never block the session itself.
+async function runPathSetup(rl, ui, home) {
+  try {
+    await setupPath({ rl, ui, home });
+  } catch (err) {
+    ui.warn(`PATH setup skipped: ${err.message}`);
+  }
+}
+
 export async function main(argv) {
   const args = parseArgs(argv);
   if (args.help) return void console.log(HELP);
@@ -282,12 +307,19 @@ export async function main(argv) {
   const state = await createState({ args, cwd, home, rl, ui });
 
   try {
+    if (args.setup) {
+      if (!rl) throw new Error('--setup needs an interactive terminal');
+      await state.onboard(args.overrides.provider ?? null);
+      await runPathSetup(rl, ui, home);
+      return;
+    }
     if (!state.config.apiKey) {
       if (!rl) {
         const { keyEnv } = PROVIDERS[state.config.provider];
         throw new Error(`no API key for ${state.config.provider}. Run nemesis in a terminal to set one up, or set ${keyEnv}`);
       }
       await state.onboard(args.overrides.provider ?? null);
+      await runPathSetup(rl, ui, home);
     }
 
     const start = await state.hooks.fire('SessionStart', { source: args.resume || args.continue ? 'resume' : 'startup' });
