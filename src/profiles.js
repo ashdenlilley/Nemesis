@@ -50,6 +50,41 @@ export async function replaceUserProfile(home, name, entry) {
   await writeFile(userConfigFile(home), `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 }
 
+// Renames a profile in one step: the entry, its per-profile key variable (moved to the new name), and the
+// active setting. A profile that shares its provider's key variable keeps that variable.
+export async function renameProfile({ home, env = process.env, from, to }) {
+  const config = await readUserConfig(home);
+  const raw = config.profiles?.[from];
+  if (!raw) throw new Error(`no profile "${from}" in the user config (a project config profile is renamed in that file)`);
+  if (!PROFILE_NAME.test(to)) throw new Error('profile names use a-z, 0-9 and dashes, and start with a letter or digit');
+  if (config.profiles[to]) throw new Error(`profile "${to}" already exists`);
+
+  const entry = normalizeProfile(from, raw);
+  const shared = PROVIDERS[entry.provider].keyEnv;
+  const oldVar = entry.keyEnv ?? shared;
+  const updates = {};
+  let next = { ...entry };
+  delete next.keyEnv;
+  if (!entry.keyless && oldVar === profileKeyEnv(from, entry.provider) && oldVar !== shared) {
+    const newVar = profileKeyEnv(to, entry.provider);
+    if (env[oldVar]) updates[newVar] = env[oldVar];
+    updates[oldVar] = null;
+    next = { ...next, keyEnv: newVar };
+  } else if (entry.keyEnv) {
+    next = { ...next, keyEnv: entry.keyEnv };
+  }
+  if (Object.keys(updates).length) await setEnvKeys(updates, { home, env });
+
+  const profiles = { ...config.profiles };
+  delete profiles[from];
+  profiles[to] = next;
+  if (config.activeProfile === from) config.activeProfile = to;
+  config.profiles = profiles;
+  await mkdir(nemesisHome(home), { recursive: true });
+  await writeFile(userConfigFile(home), `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  return { from, to, keyMoved: Boolean(updates[profileKeyEnv(to, entry.provider)]) };
+}
+
 // Removes a profile from the config. Its key stays in .env, so re-adding it needs no new key.
 export async function removeUserProfile(home, name) {
   const config = await readUserConfig(home);

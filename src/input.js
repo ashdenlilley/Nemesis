@@ -302,7 +302,8 @@ export function createLineReader({ input = process.stdin, output = process.stdou
   // The surface's rows with the status line above them.
   function area() {
     const s = surface();
-    const foot = footer ? footer.split('\n').map((l) => dim(l)) : [];
+    // Footer lines are styled by the caller (the prompt bar's bottom rule and status row).
+    const foot = footer ? footer.split('\n') : [];
     if (!s) return status || foot.length ? { lines: [...(status ? [status] : []), ...foot], row: 0, col: 0, below: foot.length } : null;
     const v = render(s);
     const top = status ? [status] : [];

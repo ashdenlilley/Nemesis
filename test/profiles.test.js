@@ -230,3 +230,36 @@ test('/profile add: the new profile can be switched to straight after it is save
   assert.equal(state.config.profile, 'claude-api');
   assert.equal(state.config.model, 'claude-haiku-5-5');
 });
+
+test('/profile rename: entry, per-profile key and active setting move; shared key stays', async () => {
+  const { renameProfile } = await import('../src/profiles.js');
+  const home = await tempDir('nemesis-ren-');
+  await saveUserConfig({
+    activeProfile: 'claude-api',
+    profiles: {
+      'claude-api': { provider: 'anthropic', models: ['claude-haiku-5-5'], model: 'claude-haiku-5-5', keyEnv: 'NEMESIS_KEY_CLAUDE_API' },
+      lab: { provider: 'openai', baseUrl: 'http://x/v1', model: 'qwen', keyEnv: 'OPENAI_API_KEY' },
+    },
+  }, home);
+  const env = { NEMESIS_KEY_CLAUDE_API: 'sk-keep' };
+  await renameProfile({ home, env, from: 'claude-api', to: 'claude' });
+  assert.equal(env.NEMESIS_KEY_CLAUDE, 'sk-keep');
+  assert.equal(env.NEMESIS_KEY_CLAUDE_API, undefined);
+  const cfg = JSON.parse(await readFile(userConfigFile(home), 'utf8'));
+  assert.equal(cfg.activeProfile, 'claude');
+  assert.equal(cfg.profiles['claude-api'], undefined);
+  assert.deepEqual(cfg.profiles.claude.models, ['claude-haiku-5-5']);
+  assert.equal(cfg.profiles.claude.keyEnv, 'NEMESIS_KEY_CLAUDE');
+
+  await renameProfile({ home, env, from: 'lab', to: 'ollama' });
+  const cfg2 = JSON.parse(await readFile(userConfigFile(home), 'utf8'));
+  assert.equal(cfg2.profiles.ollama.baseUrl, 'http://x/v1');
+  await assert.rejects(renameProfile({ home, env, from: 'ollama', to: 'claude' }), /already exists/);
+});
+
+test('Shift+Tab cycles the permission modes and wraps', async () => {
+  const { nextPermissionMode, PERMISSION_CYCLE } = await import('../src/cli.js');
+  assert.deepEqual(PERMISSION_CYCLE, ['default', 'acceptEdits', 'plan', 'bypass']);
+  assert.equal(nextPermissionMode('default'), 'acceptEdits');
+  assert.equal(nextPermissionMode('bypass'), 'default');
+});

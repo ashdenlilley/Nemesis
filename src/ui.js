@@ -231,7 +231,12 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
       finishText();
       last = null;
       held = '';
-      err.write(`${paint('dim', '─'.repeat(width()))}\n`);
+      err.write(`${this.ruleLine()}\n`);
+    },
+
+    // The accent rule that frames the prompt bar (top above the box, bottom below it).
+    ruleLine() {
+      return paintWith(accent, '─'.repeat(width()));
     },
 
     // Prompt box label. '!' (shell) and '#' (note) get their own colors.

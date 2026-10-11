@@ -22,13 +22,13 @@ Do not use `npm install -g nemesis`. The npm registry has an unrelated package w
 On a machine with the repo:
 
 ```sh
-npm pack                                     # writes nemesis-0.9.1.tgz
+npm pack                                     # writes nemesis-0.10.0.tgz
 ```
 
 Send the `.tgz` file to the user. They run:
 
 ```sh
-npm install -g ./nemesis-0.9.1.tgz
+npm install -g ./nemesis-0.10.0.tgz
 nemesis
 ```
 
@@ -93,7 +93,7 @@ Type `/help` for the live list. Custom commands come from `.nemesis/commands/*.m
 | `/sandbox [off\|strict]` | strict: no keys in shell commands, network-looking commands refused |
 | `/mcp login <name>` | sign in to a remote MCP server (OAuth) |
 | `/model` | pick a profile and model from a menu (or `/model <name>` for this profile's model) |
-| `/profile` | list profiles; `/profile use\|add\|edit\|rm <name>` |
+| `/profile` | list profiles; `/profile use\|add\|edit\|rm <name>`; `/profile rename <old> <new>` keeps the key and active setting |
 | `/jobs` | list background shells; `/jobs show\|kill <id>` |
 | `/export [file]` | export transcript to Markdown |
 | `/todos` | last task list written by the agent |
@@ -186,6 +186,7 @@ A profile is a named provider setup: provider, base URL, one or more models, and
 - `!command` runs a shell command now and keeps its output as context for the model. The prompt turns yellow.
 - `#note` appends a line to `NEMESIS.md`. The prompt turns cyan.
 - `@path` attaches a file (text is inlined; images are sent as image blocks). Tab completes paths.
+- The prompt sits between two purple rules. The status row under it shows the permission mode (Shift+Tab cycles default, accept edits, plan, bypass; the change lasts the session), the profile and model, and the `statusLine` output.
 - Up and Down recall earlier prompts; Ctrl+R searches them.
 - Ctrl+O expands the last run of read-only tool calls (`Read 3 files, searched 2 patterns`).
 - Ctrl+V attaches a clipboard image where the terminal passes the key through. `/paste` does the same from a command.

@@ -9,7 +9,7 @@ import { createPermissions, effectivePolicy } from './permissions.js';
 import { Session } from './session.js';
 import { buildSystemPrompt } from './prompt.js';
 import { runAgentTurn, settleDanglingToolUses } from './agent.js';
-import { createUI } from './ui.js';
+import { createUI, stripAnsi } from './ui.js';
 import { createLineReader } from './input.js';
 import { createHooks } from './hooks.js';
 import { startMcpServers } from './mcp/manager.js';
@@ -131,6 +131,7 @@ async function createState({ args, cwd, home, rl, ui }) {
     sessionsDir: path.join(cwd, '.nemesis', 'sessions'),
     usage: createUsage(),
     planMode: Boolean(args.plan),
+    permissionMode: args.plan ? 'plan' : 'default',
     exit: false,
     hookContext: [],
     followUps: [], // prompts queued during a turn, sent after the next tool round
@@ -355,9 +356,51 @@ async function runUserTurn(state, text, progress = null) {
   }
 }
 
-// The footer: the user's statusLine command output, when one is set.
+// Shift+Tab cycles these. bypass allows every tool (deny rules still apply); the change lasts this session.
+export const PERMISSION_CYCLE = ['default', 'acceptEdits', 'plan', 'bypass'];
+const MODE_TEXT = {
+  default: 'default permissions',
+  acceptEdits: 'accept edits on',
+  plan: 'plan mode on',
+  bypass: 'bypass permissions on',
+};
+export const nextPermissionMode = (mode) => PERMISSION_CYCLE[(PERMISSION_CYCLE.indexOf(mode) + 1) % PERMISSION_CYCLE.length];
+
+function setPermissionMode(state, mode) {
+  state.permissionMode = mode;
+  state.planMode = mode === 'plan';
+  let policy;
+  if (mode === 'bypass') policy = { read: 'allow', write: 'allow', exec: 'allow' };
+  else if (mode === 'acceptEdits') policy = { read: 'allow', write: 'allow', exec: 'ask' };
+  else policy = effectivePolicy({ config: state.config, planMode: state.planMode, readOnly: state.args.readOnly });
+  state.permissions.setPolicy(policy);
+}
+
+// The prompt bar's footer: accent rule under the box, then a status row with the permission mode,
+// the profile and model, key hints, and the user's statusLine output when one is set.
+function drawFooter(state, custom = null) {
+  if (!state.rl) return;
+  const { ui } = state;
+  const mode = state.args.readOnly
+    ? ui.dim('read-only')
+    : `${ui.accent('⏵⏵')} ${MODE_TEXT[state.permissionMode] ?? MODE_TEXT.default} ${ui.dim('(shift+tab to cycle)')}`;
+  const model = ui.dim(`${state.config.profile} · ${state.config.model}`);
+  const hints = ui.dim('/help · esc stops a turn');
+  // The row must fit on one line: a wrapped footer breaks the redraw. Drop the least important parts first.
+  const sep = ui.dim('  ·  ');
+  const parts = [mode, model, ...(custom ? [ui.dim(custom)] : []), hints];
+  const max = (state.rl.output?.columns || 80) - 1;
+  while (parts.length > 2 && stripAnsi(parts.join(sep)).length > max) parts.splice(parts.length - 2, 1);
+  state.rl.setFooter(`${ui.ruleLine()}\n${parts.join(sep)}`);
+}
+
+// The footer: the user's statusLine command output, when one is set, shown in the bar.
 async function refreshFooter(state) {
-  if (!state.config.statusLine || !state.rl) return;
+  if (!state.rl) return;
+  if (!state.config.statusLine) {
+    drawFooter(state);
+    return;
+  }
   const t = state.usage.totals();
   const payload = {
     provider: state.config.provider,
@@ -369,7 +412,7 @@ async function refreshFooter(state) {
     contextWindow: state.config.contextWindow,
     sandbox: state.config.sandbox,
   };
-  state.rl.setFooter(await runStatusLine(state.config.statusLine, payload, { cwd: state.cwd }));
+  drawFooter(state, await runStatusLine(state.config.statusLine, payload, { cwd: state.cwd }));
 }
 
 function statusLine(state, elapsedMs = null) {
@@ -492,6 +535,11 @@ async function runRepl(state) {
     await appendHistory(state.home, text).catch(() => {});
   };
   rl.onKey('\x0f', () => ui.expandLast());
+  rl.onKey('\x1b[Z', () => {
+    if (state.args.readOnly) return;
+    setPermissionMode(state, nextPermissionMode(state.permissionMode));
+    refreshFooter(state);
+  });
   rl.onKey('\x16', async () => {
     const file = await clipboardImage(path.join(state.cwd, '.nemesis', 'clipboard')).catch(() => null);
     if (file) rl.insert(`@${path.relative(state.cwd, file).split(path.sep).join('/')} `);

@@ -6,7 +6,7 @@ import { compactSession, estimateTokens } from '../compact.js';
 import { buildSystemPrompt } from '../prompt.js';
 import { effectivePolicy, parseRuleSpec } from '../permissions.js';
 import { renameSession, sessionSummaries } from '../extras.js';
-import { manageProfile, profileSummary, removeUserProfile } from '../profiles.js';
+import { manageProfile, profileSummary, removeUserProfile, renameProfile } from '../profiles.js';
 import { jobSummary } from '../jobs.js';
 import { clipboardImage } from '../clipboard.js';
 import { login } from '../mcp/oauth.js';
@@ -319,11 +319,20 @@ export function builtinCommands() {
       aliases: ['profiles'],
       description: 'List profiles; /profile use|add|edit|rm <name>',
       async run(args, state) {
-        const [verb = '', name = ''] = args.trim().split(/\s+/);
+        const words = args.trim().split(/\s+/);
+        const [verb = '', name = ''] = words;
         const profiles = state.config.profiles ?? {};
         const current = () => `${state.config.profile} · ${state.config.provider}/${state.config.model}`;
         if (!verb) {
           state.ui.info(`${profileSummary(profiles, state.config.profile)}\nactive: ${current()}`);
+          return;
+        }
+        if (verb === 'rename') {
+          const to = (words[2] ?? '').toLowerCase();
+          if (!name || !to) throw new Error('usage: /profile rename <old> <new>');
+          const result = await renameProfile({ home: state.home, env: process.env, from: name, to });
+          state.ui.info(`renamed ${result.from} to ${result.to}${result.keyMoved ? ' (key moved)' : ''}`);
+          await state.reload();
           return;
         }
         if (verb === 'use') {
@@ -556,6 +565,7 @@ export function builtinCommands() {
       description: 'Toggle plan mode (read-only tools only)',
       run(_args, state) {
         state.planMode = !state.planMode;
+        state.permissionMode = state.planMode ? 'plan' : 'default';
         state.permissions.setPolicy(effectivePolicy({ config: state.config, planMode: state.planMode, readOnly: state.args.readOnly }));
         state.ui.info(`plan mode ${state.planMode ? 'on: write and exec tools are disabled' : 'off'}`);
       },
