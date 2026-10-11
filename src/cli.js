@@ -34,7 +34,7 @@ Options:
   -m, --model <name>        model override
       --provider <name>     anthropic | openai
       --base-url <url>      API base URL override
-      --max-steps <n>       tool-call rounds per turn
+      --max-steps <n>       cap tool-call rounds per turn (default: no limit)
       --no-stream           wait for full responses instead of streaming
       --output-style <s>    ${OUTPUT_STYLES.join(' | ')}
       --add-dir <path>      allow file tools in another directory (repeatable)

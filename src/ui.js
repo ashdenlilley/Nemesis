@@ -69,25 +69,31 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
     last = kind;
   };
 
-  // Assistant text. Trailing newlines are held back so a block never ends with a blank line.
-  const writeText = (chunk) => {
+  // Assistant text ('text') or reasoning ('thinking', dim, no Markdown). Trailing newlines are held
+  // back so a block never ends with a blank line.
+  const writeText = (chunk, kind = 'text') => {
     const trailing = /\n*$/.exec(chunk)[0];
     let core = chunk.slice(0, chunk.length - trailing.length);
+    const thinking = kind === 'thinking';
+    const style = (s) => (thinking ? paint('dim', s) : s);
+    const renderer = () => {
+      md = createMarkdownStream(thinking ? {} : mdStyles);
+      flow = createFlow({ width: cols, indent: '  ' });
+    };
     if (core) {
-      if (last !== 'text') {
+      if (last !== kind) {
         core = core.replace(/^\n+/, '');
-        startBlock('text', out);
-        writeOut('● ');
-        md = createMarkdownStream(mdStyles);
-        flow = createFlow({ width: cols, indent: '  ' });
+        startBlock(kind, out);
+        writeOut(thinking ? paint('dim', '∴ ') : '● ');
+        renderer();
         flow.start(2);
       } else if (!md) {
-        md = createMarkdownStream(mdStyles);
-        flow = createFlow({ width: cols, indent: '  ' });
+        renderer();
       }
-      writeOut(flow.write(md.push(held + core)));
+      const s = flow.write(md.push(held + core));
+      if (s) writeOut(style(s));
       held = trailing;
-    } else if (last === 'text') {
+    } else if (last === kind) {
       held += trailing;
     }
   };
@@ -133,6 +139,10 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
   return {
     streamText(delta) {
       writeText(delta);
+    },
+    // Reasoning text from the model, shown dim above its answer.
+    streamThinking(delta) {
+      writeText(delta, 'thinking');
     },
     endStream() {
       finishText();

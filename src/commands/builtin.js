@@ -1,6 +1,6 @@
 import { access, mkdir, writeFile, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { OUTPUT_STYLES, PROVIDERS, saveUserConfig } from '../config.js';
+import { EFFORT_LEVELS, OUTPUT_STYLES, PROVIDERS, REASONING_MODES, saveUserConfig } from '../config.js';
 import { setEnvKeys } from '../env.js';
 import { compactSession, estimateTokens } from '../compact.js';
 import { buildSystemPrompt } from '../prompt.js';
@@ -19,6 +19,22 @@ async function canWrite(dir) {
   } catch {
     return false;
   }
+}
+
+// "200k", "1m", "128000" -> tokens. NaN when it is not a size.
+export function parseTokenCount(text) {
+  const m = /^(\d+(?:\.\d+)?)\s*([km]?)$/i.exec(text.trim());
+  if (!m) return NaN;
+  const scale = { '': 1, k: 1_000, m: 1_000_000 }[m[2].toLowerCase()];
+  return Math.round(Number(m[1]) * scale);
+}
+
+// Save a setting for the active provider (profiles.<provider>) and apply it to this session.
+// A command-line flag for the same setting no longer overrides it.
+async function setProfileSetting(state, key, value) {
+  state.config[key] = value;
+  delete state.overrides[key];
+  await saveUserConfig({ profiles: { [state.config.provider]: { [key]: value } } }, state.home);
 }
 
 function memoryFile(state) {
@@ -212,6 +228,80 @@ export function builtinCommands() {
           await saveUserConfig({ profiles: { [state.config.provider]: { model: args } } }, state.home);
         }
         state.ui.info(`model: ${state.config.provider}/${state.config.model}`);
+      },
+    },
+    {
+      name: 'max-steps',
+      aliases: ['maxsteps'],
+      description: 'Show or cap tool rounds per turn [n | off]; no limit by default',
+      async run(args, state) {
+        if (args) {
+          const off = /^(off|none|0|unlimited)$/i.test(args);
+          const n = Number(args);
+          if (!off && (!Number.isInteger(n) || n < 1)) throw new Error('usage: /max-steps <positive integer> | off');
+          state.config.maxSteps = off ? null : n;
+          delete state.overrides.maxSteps;
+          await saveUserConfig({ maxSteps: off ? null : n }, state.home);
+        }
+        state.ui.info(state.config.maxSteps
+          ? `max steps: ${state.config.maxSteps} tool rounds per turn`
+          : 'max steps: no limit (Esc or Ctrl+C stops a turn)');
+      },
+    },
+    {
+      name: 'context-window',
+      description: 'Show or set the context window in tokens, e.g. 200k or 1m [size]',
+      async run(args, state) {
+        if (args) {
+          const n = parseTokenCount(args);
+          if (!Number.isFinite(n) || n < 1000) throw new Error('usage: /context-window <tokens>, e.g. 32000, 200k, 1m');
+          await setProfileSetting(state, 'contextWindow', n);
+        }
+        const at = Math.round(state.config.contextWindow * (state.config.compactThreshold ?? 0.8));
+        state.ui.info(`context window: ${state.config.contextWindow.toLocaleString()} tokens for ${state.config.provider} (auto-compact at ~${at.toLocaleString()})`);
+      },
+    },
+    {
+      name: 'effort',
+      description: `Show or set reasoning effort: ${EFFORT_LEVELS.join(', ')}, default`,
+      async run(args, state) {
+        const level = args.toLowerCase();
+        if (level) {
+          if (level !== 'default' && !EFFORT_LEVELS.includes(level)) {
+            throw new Error(`usage: /effort ${EFFORT_LEVELS.join('|')}|default`);
+          }
+          await setProfileSetting(state, 'effort', level === 'default' ? null : level);
+        }
+        const sent = state.config.provider === 'anthropic' ? 'output_config.effort' : 'reasoning_effort';
+        state.ui.info(state.config.effort
+          ? `effort: ${state.config.effort} (sent as ${sent}; a model that does not support this level rejects the request)`
+          : "effort: model default (not sent)");
+      },
+    },
+    {
+      name: 'reasoning',
+      aliases: ['thinking'],
+      description: `Show or set model thinking: ${REASONING_MODES.join(', ')}, default`,
+      async run(args, state) {
+        const mode = args.toLowerCase();
+        if (mode) {
+          if (mode !== 'default' && !REASONING_MODES.includes(mode)) {
+            throw new Error(`usage: /reasoning ${REASONING_MODES.join('|')}|default`);
+          }
+          await setProfileSetting(state, 'reasoning', mode === 'default' ? null : mode);
+        }
+        const notes = {
+          adaptive: 'thinking on, hidden',
+          summarized: 'thinking on, summary shown in the feed',
+          disabled: 'thinking off; models with thinking always on reject this, use /effort low instead',
+        };
+        let text = state.config.reasoning
+          ? `reasoning: ${state.config.reasoning} (${notes[state.config.reasoning]})`
+          : 'reasoning: model default (not sent)';
+        if (state.config.provider !== 'anthropic') {
+          text += '\nOpenAI-compatible providers have no thinking switch; use /effort. Reasoning text the server streams is shown dim.';
+        }
+        state.ui.info(text);
       },
     },
     {

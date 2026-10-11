@@ -2,6 +2,11 @@ import { openStream, postJson, ProviderError } from './http.js';
 import { readSSE } from './sse.js';
 
 const API_VERSION = '2023-06-01';
+const THINKING = {
+  adaptive: { type: 'adaptive' },
+  summarized: { type: 'adaptive', display: 'summarized' },
+  disabled: { type: 'disabled' },
+};
 
 function parseToolJson(raw) {
   if (!raw) return {};
@@ -14,7 +19,8 @@ function parseToolJson(raw) {
 
 // Fold Anthropic SSE events into the same response shape as a non-streaming call.
 // A stream that closes before message_stop was cut off, so it is reported as a retryable failure.
-export async function readAnthropicStream(response, onText, sseOpts = {}) {
+// Thinking blocks are kept with their signatures: they must go back unchanged in later requests.
+export async function readAnthropicStream(response, onText, sseOpts = {}, onThinking = null) {
   const blocks = [];
   let stopReason = 'end_turn';
   let usage = {};
@@ -30,6 +36,10 @@ export async function readAnthropicStream(response, onText, sseOpts = {}) {
         if (cb.type === 'text') blocks[ev.index] = { type: 'text', text: cb.text ?? '' };
         else if (cb.type === 'tool_use') {
           blocks[ev.index] = { type: 'tool_use', id: cb.id, name: cb.name, input: {}, _json: '' };
+        } else if (cb.type === 'thinking') {
+          blocks[ev.index] = { type: 'thinking', thinking: cb.thinking ?? '', signature: cb.signature ?? '' };
+        } else if (cb.type) {
+          blocks[ev.index] = { ...cb }; // redacted_thinking and other blocks pass through as sent
         }
         break;
       }
@@ -41,6 +51,11 @@ export async function readAnthropicStream(response, onText, sseOpts = {}) {
           onText?.(d.text);
         } else if (b?.type === 'tool_use' && d.type === 'input_json_delta') {
           b._json += d.partial_json;
+        } else if (b?.type === 'thinking' && d.type === 'thinking_delta') {
+          b.thinking += d.thinking;
+          onThinking?.(d.thinking);
+        } else if (b?.type === 'thinking' && d.type === 'signature_delta') {
+          b.signature += d.signature;
         }
         break;
       }
@@ -81,7 +96,7 @@ export function createAnthropicProvider(config) {
 
   return {
     name: 'anthropic',
-    async createMessage({ system, messages, tools, signal, onText, model, maxTokens, onActivity, onRetry }) {
+    async createMessage({ system, messages, tools, signal, onText, onThinking, model, maxTokens, onActivity, onRetry }) {
       if (!config.apiKey) throw new Error('not logged in: run /login or set ANTHROPIC_API_KEY');
       const body = {
         model: model ?? config.model,
@@ -89,6 +104,8 @@ export function createAnthropicProvider(config) {
         system,
         messages,
       };
+      if (config.effort) body.output_config = { effort: config.effort };
+      if (THINKING[config.reasoning]) body.thinking = THINKING[config.reasoning];
       if (tools.length) {
         body.tools = tools.map(({ name, description, parameters }) => ({
           name,
@@ -107,7 +124,7 @@ export function createAnthropicProvider(config) {
       }
       const res = await openStream(url, body, headers, { signal, onRetry, idleMs });
       onActivity?.();
-      return readAnthropicStream(res, onText, { idleMs, onActivity, signal });
+      return readAnthropicStream(res, onText, { idleMs, onActivity, signal }, onThinking);
     },
   };
 }

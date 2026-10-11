@@ -63,7 +63,8 @@ export function fromOpenAIResponse(data) {
 
 // Fold chat-completion SSE chunks, including tool-call argument fragments, into one response.
 // A stream that closes with neither a finish_reason nor [DONE] was cut off: a retryable failure.
-export async function readOpenAIStream(response, onText, sseOpts = {}) {
+// Reasoning text (reasoning_content / reasoning, sent by DeepSeek, Ollama, OpenRouter, vLLM) goes to onThinking.
+export async function readOpenAIStream(response, onText, sseOpts = {}, onThinking = null) {
   let text = '';
   const calls = [];
   let finish = null;
@@ -79,6 +80,8 @@ export async function readOpenAIStream(response, onText, sseOpts = {}) {
     const choice = chunk.choices?.[0];
     if (!choice) continue;
     const delta = choice.delta ?? {};
+    const reasoning = delta.reasoning_content ?? delta.reasoning;
+    if (typeof reasoning === 'string' && reasoning) onThinking?.(reasoning);
     if (delta.content) {
       text += delta.content;
       onText?.(delta.content);
@@ -101,16 +104,18 @@ export async function readOpenAIStream(response, onText, sseOpts = {}) {
 
 export function createOpenAIProvider(config) {
   const baseUrl = (config.baseUrl ?? 'https://api.openai.com/v1').replace(/\/$/, '');
+  let streamUsage = true; // turned off for servers that reject stream_options
 
   return {
     name: 'openai',
-    async createMessage({ system, messages, tools, signal, onText, model, maxTokens, onActivity, onRetry }) {
+    async createMessage({ system, messages, tools, signal, onText, onThinking, model, maxTokens, onActivity, onRetry }) {
       if (!config.apiKey) throw new Error('not logged in: run /login or set OPENAI_API_KEY');
       const body = {
         model: model ?? config.model,
         max_tokens: maxTokens ?? config.maxTokens,
         messages: toOpenAIMessages(system, messages),
       };
+      if (config.effort) body.reasoning_effort = config.effort;
       if (tools.length) {
         body.tools = tools.map(({ name, description, parameters }) => ({
           type: 'function',
@@ -125,9 +130,17 @@ export function createOpenAIProvider(config) {
         // Without streaming no bytes arrive until the whole reply is ready, so allow longer.
         return fromOpenAIResponse(await postJson(url, body, headers, { signal, onRetry, idleMs: idleMs * 5 }));
       }
-      const res = await openStream(url, body, headers, { signal, onRetry, idleMs });
+      // Without stream_options.include_usage, streamed replies carry no token counts.
+      let res;
+      try {
+        res = await openStream(url, streamUsage ? { ...body, stream_options: { include_usage: true } } : body, headers, { signal, onRetry, idleMs });
+      } catch (err) {
+        if (!streamUsage || err.status !== 400 || !/stream_options/i.test(err.message)) throw err;
+        streamUsage = false;
+        res = await openStream(url, body, headers, { signal, onRetry, idleMs });
+      }
       onActivity?.();
-      return readOpenAIStream(res, onText, { idleMs, onActivity, signal });
+      return readOpenAIStream(res, onText, { idleMs, onActivity, signal }, onThinking);
     },
   };
 }

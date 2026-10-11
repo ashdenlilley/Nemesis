@@ -3,8 +3,8 @@ export function createUsage() {
   const totals = { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   return {
     add(usage) {
-      if (!usage) return;
       totals.requests++;
+      if (!usage) return;
       totals.input += usage.input_tokens ?? usage.prompt_tokens ?? 0;
       totals.output += usage.output_tokens ?? usage.completion_tokens ?? 0;
       totals.cacheRead += usage.cache_read_input_tokens ?? 0;

@@ -21,13 +21,21 @@ export const PROVIDERS = Object.freeze({
 });
 
 export const OUTPUT_STYLES = ['default', 'concise', 'explanatory'];
+// effort: Anthropic output_config.effort / OpenAI reasoning_effort. null leaves the model's default.
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+// reasoning (Anthropic thinking): null omits the parameter, so the model's default applies.
+//   adaptive: thinking on, text hidden. summarized: thinking on, summary shown in the feed.
+//   disabled: thinking off (rejected with a 400 by models where thinking is always on).
+export const REASONING_MODES = ['adaptive', 'summarized', 'disabled'];
 
 export const DEFAULTS = Object.freeze({
   provider: 'anthropic',
   maxTokens: 8192,
-  maxSteps: 40,
+  maxSteps: null, // tool rounds per turn; null = no limit (Esc or Ctrl+C stops a turn)
   stream: true,
   idleTimeoutSec: 120, // a model request with no data for this long is dropped and retried
+  effort: null,
+  reasoning: null,
   autoCompact: true,
   compactThreshold: 0.8,
   outputStyle: 'default',
@@ -104,7 +112,10 @@ export async function loadConfig({ cwd, home = homedir(), env = process.env, ove
     scoped(local, 'baseUrl'), scoped(project, 'baseUrl'),
     profile.baseUrl, meta.defaultBaseUrl,
   );
-  merged.contextWindow = merged.contextWindow ?? meta.contextWindow;
+  // Model-dependent settings saved by /context-window, /effort and /reasoning live in the provider's profile.
+  merged.contextWindow = pick(overrides.contextWindow, profile.contextWindow, merged.contextWindow, meta.contextWindow);
+  merged.effort = pick(overrides.effort, profile.effort, merged.effort) ?? null;
+  merged.reasoning = pick(overrides.reasoning, profile.reasoning, merged.reasoning) ?? null;
   merged.apiKey = pick(env[meta.keyEnv], env.NEMESIS_API_KEY) ?? null;
   return merged;
 }

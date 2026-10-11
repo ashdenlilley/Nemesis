@@ -77,6 +77,10 @@ Type `/help` for the live list. Custom commands come from `.nemesis/commands/*.m
 | `/memory [add <note>]` | show or append to `NEMESIS.md` |
 | `/review [focus]` | review uncommitted changes |
 | `/pr_comments [n]` | fetch and address PR review comments (needs `gh`) |
+| `/max-steps [n\|off]` | cap tool rounds per turn; no limit by default |
+| `/context-window [size]` | context window for the active provider, e.g. `200k`, `1m` |
+| `/effort [level\|default]` | `low`, `medium`, `high`, `xhigh`, `max`; sent as `output_config.effort` (Anthropic) or `reasoning_effort` (OpenAI-compatible) |
+| `/reasoning [mode\|default]` (`/thinking`) | Anthropic thinking: `adaptive`, `summarized` (shown dim in the feed), `disabled` |
 | `/agents` | list sub-agents |
 | `/mcp` | MCP server status and tools |
 | `/hooks` | configured hooks |
@@ -192,7 +196,7 @@ Internal messages use Anthropic-style blocks (`text`, `tool_use`, `tool_result`)
 - `-p` mode and non-TTY runs deny prompted tools unless `-y` is passed.
 - Interrupted turns get synthetic `tool_result` entries, so the transcript stays valid.
 - File tools stay inside the workspace roots (`cwd` plus `--add-dir` / `/add-dir`).
-- `maxSteps` caps tool rounds per turn.
+- `maxSteps` caps tool rounds per turn. Unset by default: a turn runs until the model stops or you press Esc or Ctrl+C.
 - API keys are stored in plain text in `~/.nemesis/.env`. On Windows the file gets no restricted ACL, so protect your user profile accordingly.
 
 ## Config reference
@@ -203,8 +207,9 @@ Precedence, lowest to highest: defaults, `~/.nemesis/config.json`, `.nemesis/con
 {
   "provider": "openai",
   "profiles": { "openai": { "model": "llama3", "baseUrl": "http://localhost:11434/v1" } },
-  "maxSteps": 40,
+  "maxSteps": null,
   "stream": true,
+  "idleTimeoutSec": 120,
   "autoCompact": true,
   "compactThreshold": 0.8,
   "outputStyle": "default",

@@ -247,3 +247,20 @@ test('a reply dropped mid-stream is requested again; the session gets only the c
   assert.match(warnings[0], /ECONNRESET.*again/);
   assert.deepEqual(session.messages.at(-1).content, [{ type: 'text', text: 'Hello' }]);
 });
+
+
+test('thinking blocks stay in the session history unchanged', async () => {
+  const session = await newSession();
+  await session.append({ role: 'user', content: 'go' });
+  const thinking = { type: 'thinking', thinking: 'plan', signature: 's1' };
+  const provider = scriptedProvider([
+    { stopReason: 'tool_use', content: [thinking, { type: 'tool_use', id: 't1', name: 'echo', input: { text: 'x' } }] },
+    { stopReason: 'end_turn', content: [{ type: 'text', text: 'done' }] },
+  ]);
+  const permissions = createPermissions({ policy: { read: 'allow', write: 'deny', exec: 'deny' } });
+  await runAgentTurn({
+    provider, config: {}, tools: [echoTool], system: 'sys', session, permissions,
+    ui: silentUI(), ctx: { cwd: process.cwd() }, maxSteps: 5,
+  });
+  assert.deepEqual(provider.calls[1].messages[1].content[0], thinking);
+});

@@ -62,10 +62,14 @@ export async function settleDanglingToolUses(session, reason = 'Interrupted befo
   });
 }
 
-// Assistant blocks kept in history. Empty text is dropped (providers reject it).
+// Assistant blocks kept in history. Empty text is dropped (providers reject it). Thinking blocks stay,
+// unchanged: Anthropic rejects a tool-use turn whose thinking was removed, and edited history.
+const KEPT_BLOCKS = new Set(['tool_use', 'thinking', 'redacted_thinking']);
 function normalizeContent(blocks) {
-  const kept = blocks.filter((b) => (b.type === 'text' && b.text.trim()) || b.type === 'tool_use');
-  return kept.length ? kept : [{ type: 'text', text: '(no response)' }];
+  const kept = blocks.filter((b) => (b.type === 'text' && b.text.trim()) || KEPT_BLOCKS.has(b.type));
+  return kept.some((b) => b.type !== 'thinking' && b.type !== 'redacted_thinking')
+    ? kept
+    : [...kept, { type: 'text', text: '(no response)' }];
 }
 
 // One model call. A retryable failure after the stream opened (dropped connection, stall, early close)
@@ -87,6 +91,11 @@ async function requestReply({ provider, request, ui, progress, signal }) {
           progress?.activity();
           ui.streamText(delta);
         },
+        onThinking: (delta) => {
+          streamed = true;
+          progress?.activity();
+          ui.streamThinking?.(delta);
+        },
       });
       return { response, streamed };
     } catch (err) {
@@ -107,7 +116,8 @@ export async function runAgentTurn({
 }) {
   const toolMap = new Map(tools.map((t) => [t.name, t]));
   const apiTools = tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
-  const limit = maxSteps ?? config.maxSteps;
+  // No limit unless one is set: a turn runs until the model stops or the user interrupts.
+  const limit = maxSteps ?? config.maxSteps ?? Infinity;
 
   try {
     for (let step = 0; step < limit; step++) {
@@ -124,7 +134,7 @@ export async function runAgentTurn({
       });
       usage?.add(response.usage);
 
-      const content = normalizeContent(response.content.filter((b) => b.type === 'text' || b.type === 'tool_use'));
+      const content = normalizeContent(response.content);
       await session.append({ role: 'assistant', content });
       if (streamed) ui.endStream();
       else {
@@ -177,7 +187,7 @@ export async function runAgentTurn({
       if (followUps.length) results.push({ type: 'text', text: followUps.join('\n\n') });
       await session.append({ role: 'user', content: results });
     }
-    ui.warn(`stopped after ${limit} steps; raise maxSteps or send a follow-up`);
+    ui.warn(`stopped after ${limit} tool rounds (maxSteps); raise it with /max-steps <n>, or send a follow-up to continue`);
     return { stopReason: 'max_steps' };
   } catch (err) {
     await settleDanglingToolUses(session);

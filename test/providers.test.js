@@ -163,3 +163,85 @@ test('network errors before a response are retried, then succeed', async () => {
     globalThis.fetch = realFetch;
   }
 });
+
+
+// Captures request bodies sent through fetch; replies with `reply(body)`.
+async function withFetch(reply, fn) {
+  const realFetch = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    bodies.push(body);
+    return reply(body);
+  };
+  try {
+    await fn(bodies);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+test('Anthropic: effort and reasoning settings go into the request; unset ones are omitted', async () => {
+  const ok = () => new Response(JSON.stringify({ content: [], stop_reason: 'end_turn' }), { status: 200 });
+  await withFetch(ok, async (bodies) => {
+    const base = { provider: 'anthropic', apiKey: 'k', model: 'm', maxTokens: 10, stream: false };
+    await createProvider({ ...base, effort: 'high', reasoning: 'summarized' }).createMessage({ system: 's', messages: [], tools: [] });
+    await createProvider(base).createMessage({ system: 's', messages: [], tools: [] });
+    assert.deepEqual(bodies[0].output_config, { effort: 'high' });
+    assert.deepEqual(bodies[0].thinking, { type: 'adaptive', display: 'summarized' });
+    assert.equal('output_config' in bodies[1], false);
+    assert.equal('thinking' in bodies[1], false);
+  });
+});
+
+test('Anthropic stream keeps thinking blocks with their signature and streams thinking text', async () => {
+  const body = sseBody([
+    anthropicEvent({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } }),
+    anthropicEvent({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Let me see' } }),
+    anthropicEvent({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig123' } }),
+    anthropicEvent({ type: 'content_block_stop', index: 0 }),
+    anthropicEvent({ type: 'content_block_start', index: 1, content_block: { type: 'redacted_thinking', data: 'xyz' } }),
+    anthropicEvent({ type: 'content_block_stop', index: 1 }),
+    anthropicEvent({ type: 'message_delta', delta: { stop_reason: 'end_turn' } }),
+    anthropicEvent({ type: 'message_stop' }),
+  ]);
+  const thought = [];
+  const res = await readAnthropicStream(body, null, {}, (d) => thought.push(d));
+  assert.deepEqual(thought, ['Let me see']);
+  assert.deepEqual(res.content, [
+    { type: 'thinking', thinking: 'Let me see', signature: 'sig123' },
+    { type: 'redacted_thinking', data: 'xyz' },
+  ]);
+});
+
+test('OpenAI: streams ask for usage, effort becomes reasoning_effort, and reasoning text is streamed', async () => {
+  const stream = () => new Response([
+    openaiChunk({ choices: [{ delta: { reasoning_content: 'hmm' } }] }),
+    openaiChunk({ choices: [{ delta: { content: 'Hi' }, finish_reason: 'stop' }] }),
+    openaiChunk({ choices: [], usage: { prompt_tokens: 3, completion_tokens: 1 } }),
+    'data: [DONE]\n\n',
+  ].join(''), { status: 200 });
+  await withFetch(stream, async (bodies) => {
+    const thought = [];
+    const provider = createProvider({ provider: 'openai', apiKey: 'k', model: 'm', maxTokens: 10, effort: 'low' });
+    const res = await provider.createMessage({ system: 's', messages: [], tools: [], onThinking: (d) => thought.push(d) });
+    assert.deepEqual(bodies[0].stream_options, { include_usage: true });
+    assert.equal(bodies[0].reasoning_effort, 'low');
+    assert.deepEqual(thought, ['hmm']);
+    assert.deepEqual(res.usage, { prompt_tokens: 3, completion_tokens: 1 });
+  });
+});
+
+test('OpenAI: a server that rejects stream_options is retried without it', async () => {
+  const reply = (body) => (body.stream_options
+    ? new Response(JSON.stringify({ error: { message: 'Unrecognized request argument: stream_options' } }), { status: 400 })
+    : new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { status: 200 }));
+  await withFetch(reply, async (bodies) => {
+    const provider = createProvider({ provider: 'openai', apiKey: 'k', model: 'm', maxTokens: 10 });
+    const res = await provider.createMessage({ system: 's', messages: [], tools: [] });
+    assert.equal(res.content[0].text, 'ok');
+    assert.equal(bodies.length, 2);
+    await provider.createMessage({ system: 's', messages: [], tools: [] });
+    assert.equal('stream_options' in bodies[2], false, 'remembered for later requests');
+  });
+});
