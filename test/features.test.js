@@ -382,3 +382,12 @@ test('usage accumulates Anthropic and OpenAI field names', () => {
   u.add({ prompt_tokens: 3, completion_tokens: 1 });
   assert.deepEqual(u.totals(), { requests: 2, input: 13, output: 3, cacheRead: 5, cacheWrite: 0 });
 });
+
+
+test('spinner frames are one column wide with no emoji-presentation characters', async () => {
+  const { SPINNER } = await import('../src/cli.js');
+  for (const frame of SPINNER) {
+    assert.equal([...frame].length, 1);
+    assert.doesNotMatch(frame, /\p{Emoji_Presentation}|[✳✴❇]/u, `frame ${frame}`);
+  }
+});

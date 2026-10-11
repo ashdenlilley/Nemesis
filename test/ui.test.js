@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { accentOpen, colorDepth, hexToRgb, rgbTo256, ACCENT_HEX } from '../src/theme.js';
-import { createUI, stripAnsi } from '../src/ui.js';
+import { createUI, GHOST, stripAnsi } from '../src/ui.js';
 
 const buffer = () => {
   const chunks = [];
@@ -120,4 +120,20 @@ test('a chunk ending in newlines keeps them when more text follows', () => {
   ui.streamText('Second.');
   ui.endStream();
   assert.equal(out.text, '● First paragraph.\n\n  Second.\n');
+});
+
+
+test('banner shows the pixel ghost beside the title', () => {
+  const err = buffer();
+  createUI({ out: err, err, color: false }).banner({ version: '0.7.0', provider: 'p', model: 'm', cwd: '/w', session: 's' });
+  const titleLine = err.text.split('\n').find((l) => l.includes('Nemesis 0.7.0'));
+  assert.ok(titleLine.includes(GHOST[0].trim()), titleLine);
+});
+
+test('rule and shaded rows use the full window width, not a fixed cap', () => {
+  const out = buffer();
+  out.columns = 160;
+  const ui = createUI({ out, err: out, color: false });
+  ui.rule();
+  assert.equal(out.text.trim().length, 159);
 });

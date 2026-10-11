@@ -81,7 +81,7 @@ export function builtinCommands() {
       name: 'compact',
       description: 'Summarize older turns to free context [instructions]',
       async run(args, state) {
-        const r = await compactSession({ session: state.session, provider: state.provider, instructions: args });
+        const r = await compactSession({ session: state.session, provider: state.provider, instructions: args, signal: state.controller?.signal });
         state.ui.info(r.compacted ? `compacted ${r.removed} messages; kept ${r.kept}` : r.reason);
       },
     },
@@ -228,6 +228,14 @@ export function builtinCommands() {
           await saveUserConfig({ profiles: { [state.config.provider]: { model: args } } }, state.home);
         }
         state.ui.info(`model: ${state.config.provider}/${state.config.model}`);
+      },
+    },
+    {
+      name: 'now',
+      aliases: ['send'],
+      description: 'During a turn: stop it and send the queued follow-ups now',
+      run(_args, state) {
+        state.ui.info('nothing queued. While a turn runs, type a follow-up, then /now or Enter on an empty box.');
       },
     },
     {

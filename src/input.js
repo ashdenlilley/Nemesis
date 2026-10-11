@@ -180,6 +180,8 @@ function advance(start, s) {
   return col;
 }
 const eofError = () => Object.assign(new Error('input closed'), { code: 'EOF' });
+// A question cancelled by a key: code 'INTERRUPT' for Ctrl+C, 'CANCEL' for Esc.
+const cancelError = (code) => Object.assign(new Error('cancelled'), { code });
 
 // Suggestion rows under a prompt box. `items` are { name, description }; `index` is highlighted.
 // Shows a window of MAX_SUGGESTIONS rows that keeps the highlighted one visible.
@@ -408,9 +410,16 @@ export function createLineReader({ input = process.stdin, output = process.stdou
     }
     if (suggestionKey(line ?? watching, chunk)) return;
     if (line) {
+      // Esc clears typed text; on an empty box it cancels the question.
+      if (chunk === '\x1b') {
+        if (!line.st.text) return finishLine(null, cancelError('CANCEL'));
+        Object.assign(line.st, { text: '', cur: 0, top: 0 });
+        return paint();
+      }
       const action = applyInput(line.st, chunk);
       if (action === 'submit') return finishLine(line.st.text);
-      if (action === 'interrupt' || action === 'eof') return finishLine(null, eofError());
+      if (action === 'interrupt') return finishLine(null, cancelError('INTERRUPT'));
+      if (action === 'eof') return finishLine(null, eofError());
       return paint();
     }
     const w = watching;
@@ -447,6 +456,7 @@ export function createLineReader({ input = process.stdin, output = process.stdou
 
     // Resolves with the entered text. secret: characters show as dots. leave: keep the box on screen.
     // complete(text) -> [{ name, description }] lists matches under the box.
+    // Rejects with code 'INTERRUPT' (Ctrl+C on an empty box), 'CANCEL' (Esc on an empty box), or 'EOF' (Ctrl+D).
     question(label, { secret = false, leave = true, complete = null } = {}) {
       if (!input.isTTY) return Promise.reject(new Error('line input needs a terminal'));
       if (closed) return Promise.reject(eofError());

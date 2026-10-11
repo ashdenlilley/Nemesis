@@ -181,7 +181,9 @@ async function createState({ args, cwd, home, rl, ui }) {
   return state;
 }
 
-const SPINNER = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
+// One column each, all text presentation: ✳ (U+2733) is left out because terminals draw it as a green emoji.
+export const SPINNER = ['·', '✢', '✶', '✻', '✽', '✻', '✶', '✢'];
+const EXIT_WINDOW_MS = 2000; // a second Ctrl+C on an empty prompt within this exits
 const STALE_SECS = 20; // waiting this long on the model with no data shows a warning in the status line
 
 const formatSecs = (s) => (s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`);
@@ -283,14 +285,17 @@ async function runUserTurn(state, text, progress = null) {
     });
     return true;
   } catch (err) {
-    if (err.name === 'AbortError') state.ui.warn('interrupted');
-    else {
+    if (err.name === 'AbortError') {
+      if (state.sendNow) state.ui.info(state.ui.dim('  stopped to send the queued message'));
+      else state.ui.warn('interrupted');
+    } else {
       state.ui.error(err.message);
       if (err.retryable) state.ui.info(state.ui.dim('  The model connection failed after retries. The session is intact; send your message again to retry.'));
     }
     return false;
   } finally {
     state.controller = null;
+    state.sendNow = false;
     const elapsed = progress?.stop() ?? null;
     state.ui.status(statusLine(state, elapsed));
   }
@@ -327,7 +332,13 @@ async function runWatchedTurn(state, text) {
     complete: commandCompleter(state),
     onSubmit: (typed) => {
       const queued = typed.trim();
-      if (!queued) return;
+      // Send now: Enter on an empty box, or /now, stops the turn; the queue becomes the next prompt.
+      if (!queued || /^\/(now|send)$/i.test(queued)) {
+        if (!state.followUps.length) return;
+        state.sendNow = true;
+        state.controller?.abort();
+        return;
+      }
       state.followUps.push(queued);
       state.ui.queued(queued);
     },
@@ -336,6 +347,41 @@ async function runWatchedTurn(state, text) {
   try {
     return await runUserTurn(state, text, startSpinner(state.rl, state.ui));
   } finally {
+    state.rl.unwatch();
+  }
+}
+
+const isCancel = (err) => err?.name === 'AbortError' || ['CANCEL', 'INTERRUPT', 'EOF'].includes(err?.code);
+
+// A slash command with a prompt box up: Esc or Ctrl+C (on an empty box, or in any question the
+// command asks) cancels it. Text typed meanwhile is kept as the next prompt. Returns the prompt
+// the command wants sent to the model, or null.
+async function runSlashCommand(state, text) {
+  const controller = new AbortController();
+  state.controller = controller;
+  const cancelled = new Promise((_, reject) => {
+    controller.signal.addEventListener('abort', () => reject(Object.assign(new Error('cancelled'), { name: 'AbortError' })), { once: true });
+  });
+  state.rl.watch({
+    label: state.ui.prompt(),
+    complete: commandCompleter(state),
+    onSubmit: (typed) => {
+      if (typed.trim()) state.followUps.push(typed.trim());
+    },
+    onInterrupt: () => controller.abort(),
+  });
+  const run = state.registry.dispatch(text);
+  run.catch(() => {}); // still settles after a cancel; nothing waits for it then
+  try {
+    const r = await Promise.race([run, cancelled]);
+    if (!r.handled) state.ui.error(r.error);
+    return r.handled ? r.prompt : null;
+  } catch (err) {
+    if (isCancel(err)) state.ui.warn(`cancelled ${text.split(/\s/)[0]}`);
+    else state.ui.error(err.message);
+    return null;
+  } finally {
+    state.controller = null;
     state.rl.unwatch();
   }
 }
@@ -354,9 +400,11 @@ async function runRepl(state) {
     cwd: state.cwd,
     session: state.session.id,
   });
-  ui.info(ui.dim('  /help for commands · Ctrl+C interrupts a running turn · /exit quits'));
+  ui.info(ui.dim('  /help for commands · Esc or Ctrl+C stops a turn or command · Ctrl+C twice exits'));
 
   let leftover = null; // follow-ups not consumed by the last turn; they become the next prompt
+  let lastCtrlC = 0;
+  let showRule = true;
   while (!state.exit) {
     let text;
     if (leftover !== null) {
@@ -365,11 +413,22 @@ async function runRepl(state) {
     } else {
       let raw;
       try {
-        ui.rule();
+        if (showRule) ui.rule();
+        showRule = true;
         // The box clears on Enter; the feed shows the prompt.
         raw = await rl.question(ui.prompt(), { leave: false, complete: commandCompleter(state) });
-      } catch {
-        break; // input closed
+      } catch (err) {
+        if (err.code === 'CANCEL') {
+          showRule = false;
+          continue;
+        }
+        if (err.code === 'INTERRUPT' && Date.now() - lastCtrlC > EXIT_WINDOW_MS) {
+          lastCtrlC = Date.now();
+          ui.info(ui.dim('  press Ctrl+C again to exit'));
+          showRule = false;
+          continue;
+        }
+        break; // second Ctrl+C, Ctrl+D, or input closed
       }
       text = raw.trim();
       if (!text) continue;
@@ -377,13 +436,9 @@ async function runRepl(state) {
     ui.userMessage(text);
 
     if (text.startsWith('/')) {
-      try {
-        const r = await state.registry.dispatch(text);
-        if (!r.handled) ui.error(r.error);
-        else if (r.prompt) await runWatchedTurn(state, r.prompt);
-      } catch (err) {
-        ui.error(err.message);
-      }
+      const prompt = await runSlashCommand(state, text);
+      if (prompt) await runWatchedTurn(state, prompt);
+      if (state.followUps.length) leftover = state.followUps.splice(0).join('\n\n');
       continue;
     }
     await runWatchedTurn(state, text);

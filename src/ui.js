@@ -17,6 +17,14 @@ const TOOL_LABELS = {
   todo_write: 'Todos',
   task: 'Task',
 };
+// Nemesis mascot: an 8x8 pixel ghost in half blocks (two pixel rows per line), eyes left open.
+//   ..####..   .######.   ##.##.##   ##.##.##   ########   ########   ########   #.#..#.#
+export const GHOST = [
+  ' ▄████▄ ',
+  '██ ██ ██',
+  '████████',
+  '█▀█▀▀█▀█',
+];
 const DIFF_LINES = 8; // per side, before "… N more lines"
 
 // depth: 'truecolor' | '256' | 'basic' | 'none'. color: true/false overrides detection (tests).
@@ -46,7 +54,9 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
   let flow = null; // word wrap for it
 
   const cols = () => out.columns || err.columns || 80;
-  const width = () => Math.min(cols(), 100);
+  // Full window width, read on every write so a resize takes effect. One column is left free:
+  // a row filled to the last column makes some terminals (Windows conhost) wrap an extra blank line.
+  const width = () => Math.max(20, cols() - 1);
 
   const writeOut = (s) => {
     if (!s) return;
@@ -99,8 +109,9 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
   };
 
   const summarize = (tool, input) => {
-    if (tool?.describeCall) return getFirstLine(tool.describeCall(input), 100);
-    return getFirstLine(JSON.stringify(input ?? {}), 100);
+    const room = Math.max(40, width() - 20);
+    if (tool?.describeCall) return getFirstLine(tool.describeCall(input), room);
+    return getFirstLine(JSON.stringify(input ?? {}), room);
   };
   const callLine = (use, tool) => `${accentText('●')} ${paint('bold', TOOL_LABELS[use.name] ?? use.name)}(${summarize(tool, use.input)})`;
 
@@ -163,23 +174,26 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
         { text: cwd, style: 'dim' },
         { text: `session ${session}`, style: 'dim' },
       ];
+      const ghostW = GHOST[0].length;
+      const infoText = (item, room) => {
+        const text = item.text.length > room ? `${item.text.slice(0, room - 1)}…` : item.text;
+        return item.style === 'title' ? accentText(text) : item.style === 'dim' ? paint('dim', text) : text;
+      };
+      // The ghost sits beside the four info lines, between the logo and the text.
+      const ghostRow = (i) => (GHOST[i] ? `${paintWith(accent, GHOST[i])}  ` : ' '.repeat(ghostW + 2));
       const logoCols = width() >= 90 ? 52 : 34;
       const logo = logoLines(logoCols);
       if (!logo) {
-        err.write(`${accentText(`✻ Nemesis ${version}`)}\n`);
-        for (const line of info.slice(1)) err.write(`  ${paint(line.style === 'dim' ? 'dim' : 'plain', line.text)}\n`);
+        info.forEach((item, i) => err.write(`${ghostRow(i)}${infoText(item, width() - ghostW - 2)}\n`));
         return;
       }
       const top = Math.max(0, Math.floor((logo.length - info.length) / 2));
-      const room = width() - logoCols - 4;
+      const room = width() - logoCols - 3 - ghostW - 2;
       for (let r = 0; r < logo.length; r++) {
-        const item = info[r - top];
-        let right = '';
-        if (item) {
-          const text = item.text.length > room ? `${item.text.slice(0, room - 1)}…` : item.text;
-          right = item.style === 'title' ? accentText(text) : item.style === 'dim' ? paint('dim', text) : text;
-        }
-        err.write(`${paintWith(accent, logo[r].padEnd(logoCols))}   ${right}\n`);
+        const i = r - top;
+        const item = info[i];
+        const right = item ? `${ghostRow(i)}${infoText(item, room)}` : '';
+        err.write(`${paintWith(accent, logo[r].padEnd(logoCols))}   ${right}`.trimEnd() + '\n');
       }
     },
 
@@ -207,7 +221,7 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
     // A follow-up waiting for the next tool call.
     queued(text) {
       startBlock('meta', err);
-      err.write(`${paint('dim', `  queued: ${getFirstLine(text, 100)}`)}\n`);
+      err.write(`${paint('dim', `  queued: ${getFirstLine(text, Math.max(30, width() - 60))} · Enter on an empty box or /now sends it now`)}\n`);
     },
 
     // One line under the answer, e.g. ✻ Nms'd for 12s · done 6:23 PM · model · tokens.
@@ -232,7 +246,7 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
       }
       const text = String(outcome.content ?? '').trim();
       const more = text.split('\n').length - 1;
-      const preview = getFirstLine(text, 120);
+      const preview = getFirstLine(text, Math.max(40, width() - 20));
       const tail = more > 0 ? ` … +${more} lines` : '';
       err.write(paint(outcome.isError ? 'red' : 'dim', `  ⎿  ${preview}${tail}`) + '\n');
     },
@@ -276,7 +290,7 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
         toolResult(use, outcome) {
           if (outcome.isError) {
             startBlock('tool', err);
-            err.write(`${tag}   ${paint('red', `⎿  ${getFirstLine(outcome.content, 100)}`)}\n`);
+            err.write(`${tag}   ${paint('red', `⎿  ${getFirstLine(outcome.content, Math.max(40, width() - 20))}`)}\n`);
           }
         },
         warn: (t) => err.write(`${tag} ${paint('yellow', `warning: ${t}`)}\n`),

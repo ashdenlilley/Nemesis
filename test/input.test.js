@@ -251,3 +251,20 @@ test('status line sits above the watch box, and Esc interrupts the turn', async 
   reader.setStatus(null);
   reader.unwatch();
 });
+
+
+test('question: Esc clears typed text, then cancels; Ctrl+C on an empty box rejects with INTERRUPT', async () => {
+  const term = fakeTerminal();
+  const reader = createLineReader({ input: term.input, output: term.output });
+  const tick = () => new Promise((r) => setImmediate(r));
+  const first = reader.question('> ');
+  term.input.write('abc');
+  await tick();
+  term.input.write('\x1b');
+  await tick();
+  term.input.write('\x1b');
+  await assert.rejects(first, (err) => err.code === 'CANCEL');
+  const second = reader.question('> ');
+  term.input.write('\x03');
+  await assert.rejects(second, (err) => err.code === 'INTERRUPT');
+});
