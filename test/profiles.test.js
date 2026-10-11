@@ -263,3 +263,12 @@ test('Shift+Tab cycles the permission modes and wraps', async () => {
   assert.equal(nextPermissionMode('default'), 'acceptEdits');
   assert.equal(nextPermissionMode('bypass'), 'default');
 });
+
+test('/profile completion offers profile names for use, edit, rm and the first argument of rename', async () => {
+  const { profileNameCompletions } = await import('../src/cli.js');
+  const profiles = { claude: { provider: 'anthropic', model: 'claude-haiku-5-5' }, lab: { provider: 'openai', model: 'qwen' } };
+  const items = profileNameCompletions('/profile use c', 'c', profiles);
+  assert.deepEqual(items.map((i) => i.name), ['claude']);
+  assert.equal(items[0].apply('/profile use c'), '/profile use claude ');
+  assert.equal(profileNameCompletions('/profile rm ', '', profiles).length, 2);
+});

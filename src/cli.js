@@ -277,9 +277,25 @@ function startSpinner(rl, ui) {
 }
 
 // Slash commands matching what is typed so far, for the prompt box's suggestion list.
+// Profile names starting with what has been typed. Picking one replaces the partial name, and the box stays open.
+export function profileNameCompletions(text, partial, profiles) {
+  const q = partial.toLowerCase();
+  return Object.keys(profiles)
+    .filter((name) => name.toLowerCase().startsWith(q))
+    .sort()
+    .map((name) => ({
+      name,
+      description: profiles[name]?.model ?? profiles[name]?.models?.[0] ?? '',
+      apply: (t) => t.slice(0, t.length - partial.length) + name + ' ',
+    }));
+}
+
 function commandCompleter(state) {
   return (text) => {
     if (/(^|\s)@[^\s]*$/.test(text)) return mentionCompletions(text, { cwd: state.cwd });
+    // /profile use|edit|rm|rename <name>: complete the profile name (add takes a new name, so it is not completed).
+    const profileArg = /^\/profiles?\s+(use|edit|rm|rename)\s+(\S*)$/i.exec(text);
+    if (profileArg) return profileNameCompletions(text, profileArg[2], state.config.profiles ?? {});
     if (!/^\/\S*$/.test(text)) return [];
     const q = text.slice(1).toLowerCase();
     const items = [

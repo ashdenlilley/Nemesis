@@ -44,7 +44,7 @@ export class McpClient {
     const init = await this.request('initialize', {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: 'nemesis', version: '0.11.0' },
+      clientInfo: { name: 'nemesis', version: '0.11.1' },
     });
     this.serverInfo = init.serverInfo ?? {};
     this.notify('notifications/initialized');
