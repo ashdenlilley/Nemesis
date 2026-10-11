@@ -127,6 +127,65 @@ test('question with leave:false clears the box on submit instead of keeping it o
   await new Promise((r) => setImmediate(r));
   term.input.write('\r');
   assert.equal(await answer, 'hi');
-  // The box is erased, not left behind: the last drawn box is cleared before the terminal modes reset.
-  assert.match(term.text(), /\x1b\[J\x1b\[\?2004l/);
+  // The box is erased, not left behind, and raw mode stays on for the next prompt.
+  assert.ok(term.text().endsWith('\x1b[J'));
+  assert.doesNotMatch(term.text(), /\x1b\[\?2004l/);
+});
+
+test('raw mode stays on between prompts and turns off only on close', async () => {
+  const term = fakeTerminal();
+  const modes = [];
+  term.input.setRawMode = (on) => modes.push(on);
+  const reader = createLineReader({ input: term.input, output: term.output });
+  const first = reader.question('> ');
+  term.input.write('a');
+  term.input.write('\r');
+  await first;
+  const second = reader.question('> ');
+  term.input.write('b');
+  term.input.write('\r');
+  await second;
+  assert.deepEqual(modes, [true]);
+  reader.close();
+  assert.deepEqual(modes, [true, false]);
+});
+
+test('keys pressed while no box is up go into the next box, including a paste', async () => {
+  const term = fakeTerminal();
+  const reader = createLineReader({ input: term.input, output: term.output });
+  const first = reader.question('> ');
+  term.input.write('x');
+  term.input.write('\r');
+  await first;
+  term.input.write('\x1b[200~sk-pasted-key\x1b[201~');
+  await new Promise((r) => setImmediate(r));
+  const key = reader.question('Key: ', { secret: true });
+  term.input.write('\r');
+  assert.equal(await key, 'sk-pasted-key');
+});
+
+test('unsent text in a watch box carries into the next prompt', async () => {
+  const term = fakeTerminal();
+  const reader = createLineReader({ input: term.input, output: term.output });
+  reader.watch({ label: '> ', onSubmit: () => {}, onInterrupt: () => {} });
+  term.input.write('half typed');
+  await new Promise((r) => setImmediate(r));
+  reader.unwatch();
+  const next = reader.question('> ', { leave: false });
+  term.input.write(' more');
+  await new Promise((r) => setImmediate(r));
+  term.input.write('\r');
+  assert.equal(await next, 'half typed more');
+});
+
+test('a secret question shows dots, never the characters', async () => {
+  const term = fakeTerminal();
+  const reader = createLineReader({ input: term.input, output: term.output });
+  const key = reader.question('Key: ', { secret: true });
+  term.input.write('abc');
+  await new Promise((r) => setImmediate(r));
+  term.input.write('\r');
+  assert.equal(await key, 'abc');
+  assert.match(term.text(), /•••/);
+  assert.doesNotMatch(term.text(), /abc/);
 });

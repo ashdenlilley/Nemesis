@@ -9,6 +9,7 @@ const PASTE_END = '\x1b[201~';
 // One escape sequence at the start of a string: CSI, SS3, or ESC followed by one character.
 const ESCAPE_SEQ = /^\x1b(?:\[[0-9;?]*[ -/]*[@-~]|O[A-Za-z]|[\s\S])?/;
 const ANSI = /\x1b\[[0-9;]*m/g;
+const CONTROL_SEQ = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|[78])/g;
 
 const normalize = (s) => s.replace(/\r\n?/g, '\n');
 const lineStart = (text, i) => (i <= 0 ? 0 : text.lastIndexOf('\n', i - 1) + 1);
@@ -167,6 +168,16 @@ export function applyInput(st, chunk) {
 
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;
 const newEditor = () => ({ text: '', cur: 0, top: 0, pasting: false });
+
+// Visible columns after writing `s` on a line that already had `start` columns. Tabs stop every 8.
+function advance(start, s) {
+  let col = start;
+  for (const ch of s.replace(CONTROL_SEQ, '')) {
+    if (ch === '\t') col += 8 - (col % 8);
+    else if (ch >= ' ') col++;
+  }
+  return col;
+}
 const eofError = () => Object.assign(new Error('input closed'), { code: 'EOF' });
 
 // Terminal input and the live area at the bottom of the screen. The live area is one of:
@@ -174,14 +185,21 @@ const eofError = () => Object.assign(new Error('input closed'), { code: 'EOF' })
 //   line:   question(), a prompt box that resolves with the entered text.
 //   watch:  watch(), a prompt box that stays up during a turn. Each Enter goes to onSubmit.
 // Output goes through wrap(): it clears the live area, writes the text, then redraws the area below it.
+// Raw mode stays on from the first prompt until close(). Turning it off on Windows starts a line-mode
+// console read that swallows keys until Enter, so typing between prompts would need an extra Enter.
+// Keys pressed while no box is up are kept and replayed into the next one.
 export function createLineReader({ input = process.stdin, output = process.stdout } = {}) {
   let line = null; // { label, secret, leave, st, resolve, reject }
   let watching = null; // { label, st, onSubmit, onInterrupt }
   let menu = null; // { title, options, index, resolve }
-  let shown = null; // { row, saved }: live area on screen; row is the cursor's row inside it
+  let shown = null; // { row, partial }: live area on screen; row is the cursor's row inside it
   let atLineStart = true; // the last text written ended with a newline
+  let tailCols = 0; // columns of text after the last newline written
   let attached = false; // raw input listener installed
   let closed = false;
+  let pending = ''; // keys pressed while no box was up
+  let draft = null; // editor state of a watch box that closed with unsent text
+  const sigint = [];
   const cols = () => output.columns || 80;
 
   const surface = () => menu ?? line ?? watching;
@@ -195,14 +213,16 @@ export function createLineReader({ input = process.stdin, output = process.stdou
     const { label, secret, st } = s;
     const prefixW = label.replace(ANSI, '').length;
     const width = Math.max(10, cols() - prefixW);
-    const { rows, cursorRow, cursorCol } = secret ? layout('', 0, width) : layout(st.text, st.cur, width);
+    // Secret text shows as dots so a paste is visibly received.
+    const shownText = secret ? '•'.repeat(st.text.length) : st.text;
+    const { rows, cursorRow, cursorCol } = layout(shownText, st.cur, width);
     const { start, end } = viewport(rows.length, cursorRow, st.top);
     st.top = start;
 
     const indent = ' '.repeat(prefixW);
     const lines = [];
     if (start > 0) lines.push(dim(`… ${start} more above`));
-    for (let i = start; i < end; i++) lines.push((i === 0 ? label : indent) + (secret ? '' : rows[i]));
+    for (let i = start; i < end; i++) lines.push((i === 0 ? label : indent) + rows[i]);
     if (end < rows.length) lines.push(dim(`… ${rows.length - end} more below`));
 
     const row = (start > 0 ? 1 : 0) + cursorRow - start;
@@ -214,29 +234,39 @@ export function createLineReader({ input = process.stdin, output = process.stdou
     let buf = '';
     if (shown) {
       buf += `\r${shown.row ? `\x1b[${shown.row}A` : ''}\x1b[J`;
-      if (shown.saved) buf += '\x1b8'; // back to the end of a partial line
+      // Back to the end of a partial line. Moving by rows stays right when drawing the area scrolled
+      // the screen, which a saved cursor position does not. A line that exactly filled its last row
+      // continues at the start of the area's row, where the terminal would wrap it anyway.
+      if (shown.partial) {
+        const col = tailCols % cols();
+        if (col) buf += `\x1b[A\x1b[${col}C`;
+      }
       shown = null;
     }
     buf += text;
-    if (text) atLineStart = text.endsWith('\n');
+    if (text) {
+      atLineStart = text.endsWith('\n');
+      const brk = Math.max(text.lastIndexOf('\n'), text.lastIndexOf('\r'));
+      tailCols = brk === -1 ? advance(tailCols, text) : advance(0, text.slice(brk + 1));
+    }
 
     const s = surface();
     if (s) {
       const v = render(s);
-      // Mid-line text: step to a fresh line for the area and remember where the text ended.
-      const saved = !atLineStart;
-      if (saved) buf += '\x1b7\r\n';
+      // Mid-line text: step to a fresh line for the area.
+      const partial = !atLineStart;
+      if (partial) buf += '\r\n';
       buf += v.lines.join('\r\n');
       if (v.below) buf += `\x1b[${v.below}A`;
       buf += `\r${v.col ? `\x1b[${v.col}C` : ''}`;
-      shown = { row: v.row, saved };
+      shown = { row: v.row, partial };
     }
     output.write(buf);
   }
 
-  // Raw input is on only while something is waiting for keys.
+  // Raw input turns on with the first prompt and stays on until close().
   function updateMode() {
-    const want = Boolean(line || watching || menu);
+    const want = !closed && Boolean(line || watching || menu);
     if (want && !attached) {
       input.setEncoding('utf8');
       input.setRawMode(true);
@@ -246,13 +276,29 @@ export function createLineReader({ input = process.stdin, output = process.stdou
       output.write('\x1b[?2004h\x1b[>1u');
       input.on('data', onData);
       attached = true;
-    } else if (!want && attached) {
+    } else if (closed && attached) {
       input.off('data', onData);
       input.setRawMode(false);
       input.pause();
       output.write('\x1b[?2004l\x1b[<u');
       attached = false;
     }
+  }
+
+  // Editor state for a new text box: the unsent watch draft (never for secrets), else a blank one.
+  function openEditor(secret) {
+    if (secret || !draft) return newEditor();
+    const st = draft;
+    draft = null;
+    return st;
+  }
+
+  // Keys pressed while no box was up go into the box that just opened.
+  function replayPending() {
+    if (!pending || menu || !(line || watching)) return;
+    const keys = pending;
+    pending = '';
+    onData(keys);
   }
 
   function finishLine(text, error) {
@@ -270,8 +316,8 @@ export function createLineReader({ input = process.stdin, output = process.stdou
     const m = menu;
     menu = null;
     paint();
-    updateMode();
     m.resolve(index);
+    replayPending();
   }
 
   function menuKey(chunk) {
@@ -288,6 +334,17 @@ export function createLineReader({ input = process.stdin, output = process.stdou
 
   function onData(chunk) {
     if (menu) return menuKey(chunk);
+    if (!line && !watching) {
+      // No box up: Ctrl+C acts as SIGINT (raw mode stops the terminal sending it); other keys wait.
+      if (chunk === '\x03' && !pending) {
+        if (sigint.length) return sigint.forEach((fn) => fn());
+        closed = true;
+        updateMode();
+        return process.kill(process.pid, 'SIGINT');
+      }
+      pending += chunk;
+      return;
+    }
     if (line) {
       const action = applyInput(line.st, chunk);
       if (action === 'submit') return finishLine(line.st.text);
@@ -330,9 +387,10 @@ export function createLineReader({ input = process.stdin, output = process.stdou
       if (closed) return Promise.reject(eofError());
       if (line || menu) return Promise.reject(new Error('input is already waiting for a line'));
       return new Promise((resolve, reject) => {
-        line = { label, secret, leave, resolve, reject, st: newEditor() };
+        line = { label, secret, leave, resolve, reject, st: openEditor(secret) };
         paint();
         updateMode();
+        replayPending();
       });
     },
 
@@ -350,21 +408,26 @@ export function createLineReader({ input = process.stdin, output = process.stdou
     // Keeps a prompt box up while a turn runs. Enter calls onSubmit(text); Ctrl+C on an empty box calls onInterrupt().
     watch({ label, onSubmit, onInterrupt }) {
       if (!input.isTTY) return;
-      watching = { label, st: newEditor(), onSubmit, onInterrupt };
+      watching = { label, st: openEditor(false), onSubmit, onInterrupt };
       paint();
       updateMode();
+      replayPending();
     },
 
+    // Text typed but not sent stays as a draft for the next prompt box.
     unwatch() {
       if (!watching) return;
+      if (watching.st.text) draft = Object.assign(watching.st, { top: 0, pasting: false });
       watching = null;
       paint();
-      updateMode();
     },
 
-    // SIGINT outside a question (a running turn with no watch box) reaches the process; inside one, Ctrl+C is a key.
+    // SIGINT before raw mode is on reaches the process. After that, Ctrl+C with no box up calls fn.
     on(event, fn) {
-      if (event === 'SIGINT') process.on('SIGINT', fn);
+      if (event === 'SIGINT') {
+        process.on('SIGINT', fn);
+        sigint.push(fn);
+      }
       return this;
     },
 
