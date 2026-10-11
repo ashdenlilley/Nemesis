@@ -22,13 +22,13 @@ Do not use `npm install -g nemesis`. The npm registry has an unrelated package w
 On a machine with the repo:
 
 ```sh
-npm pack                                     # writes nemesis-0.5.1.tgz
+npm pack                                     # writes nemesis-0.6.0.tgz
 ```
 
 Send the `.tgz` file to the user. They run:
 
 ```sh
-npm install -g ./nemesis-0.5.1.tgz
+npm install -g ./nemesis-0.6.0.tgz
 nemesis
 ```
 
