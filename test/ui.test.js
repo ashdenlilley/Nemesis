@@ -48,7 +48,7 @@ test('UI with color off emits no escape codes', () => {
 test('UI with truecolor paints the accent #7F00FF on tool calls and prompt', () => {
   const err = buffer();
   const ui = createUI({ out: buffer(), err, depth: 'truecolor' });
-  ui.toolCall({ name: 'grep', input: { pattern: 'x' } }, null);
+  ui.toolCall({ name: 'bash', input: { command: 'x' } }, null);
   assert.ok(err.text.includes('\x1b[38;2;127;0;255m'));
   assert.ok(ui.prompt().includes('\x1b[38;2;127;0;255m'));
   assert.equal(stripAnsi(ui.prompt()), '❯ ');

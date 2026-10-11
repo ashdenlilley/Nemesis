@@ -5,6 +5,8 @@ import { setEnvKeys } from '../env.js';
 import { compactSession, estimateTokens } from '../compact.js';
 import { buildSystemPrompt } from '../prompt.js';
 import { effectivePolicy, parseRuleSpec } from '../permissions.js';
+import { renameSession, sessionSummaries } from '../extras.js';
+import { clipboardImage } from '../clipboard.js';
 import { login } from '../mcp/oauth.js';
 import { SANDBOX_MODES } from '../sandbox.js';
 import { Session } from '../session.js';
@@ -267,6 +269,63 @@ export function builtinCommands() {
       },
     },
     {
+      name: 'rewind',
+      aliases: ['undo'],
+      description: 'Restore files, the conversation, or both to before an earlier prompt',
+      async run(_args, state) {
+        if (!state.rl?.choose) throw new Error('/rewind needs an interactive terminal');
+        const turns = (await state.checkpoints().list());
+        if (!turns.length) throw new Error('nothing to rewind yet: no prompt has changed files in this session');
+        const shown = turns.slice(0, 15);
+        const picked = await state.rl.choose({
+          title: 'Rewind to before which prompt?',
+          options: shown.map((t) => `${t.prompt.replace(/\s+/g, ' ').slice(0, 60)}  (${t.count} file${t.count === 1 ? '' : 's'})`),
+        });
+        if (picked < 0) return;
+        const turn = shown[picked];
+        const mode = await state.rl.choose({
+          title: 'Restore what?',
+          options: ['Code and conversation', 'Code only', 'Conversation only', 'Cancel'],
+        });
+        if (mode < 0 || mode === 3) return;
+        const cp = state.checkpoints();
+        const notes = [];
+        if (mode !== 2) notes.push(`${await cp.restoreFiles(turn.i)} file(s) restored`);
+        if (mode !== 1) {
+          if (state.session.messages.length < turn.messageIndex) {
+            notes.push('conversation not cut: it was compacted since that prompt');
+          } else {
+            await state.session.replace(state.session.messages.slice(0, turn.messageIndex), { archive: true });
+            await cp.dropFrom(turn.i);
+            state.rl.setDraft?.(turn.prompt);
+            notes.push('conversation cut; the prompt is back in the box to edit');
+          }
+        }
+        state.ui.info(notes.join('; '));
+      },
+    },
+    {
+      name: 'rename',
+      description: 'Name this session, shown in the /resume picker: /rename <title>',
+      async run(args, state) {
+        if (!args.trim()) throw new Error('usage: /rename <title>');
+        await renameSession(state.sessionsDir, state.session.id, args.trim().slice(0, 80));
+        state.ui.info(`session named "${args.trim().slice(0, 80)}"`);
+      },
+    },
+    {
+      name: 'paste',
+      aliases: ['paste-image'],
+      description: 'Attach the clipboard image to the next prompt',
+      async run(_args, state) {
+        const file = await clipboardImage(path.join(state.cwd, '.nemesis', 'clipboard'));
+        if (!file) throw new Error('no image on the clipboard (or no clipboard tool: Windows PowerShell, pngpaste on macOS, xclip on Linux)');
+        const rel = path.relative(state.cwd, file).split(path.sep).join('/');
+        state.attachments.push(rel);
+        state.ui.info(`attached ${rel} to the next prompt`);
+      },
+    },
+    {
       name: 'now',
       aliases: ['send'],
       description: 'During a turn: stop it and send the queued follow-ups now',
@@ -414,12 +473,24 @@ export function builtinCommands() {
     {
       name: 'resume',
       aliases: ['continue'],
-      description: 'List recent sessions, or /resume <id> to switch',
+      description: 'Pick a session to resume, or /resume <id>',
       async run(args, state) {
         if (!args) {
-          const sessions = (await Session.list(state.sessionsDir)).slice(0, 10);
-          const lines = sessions.map((s) => `${s.id === state.session.id ? '*' : ' '} ${s.id}`);
-          state.ui.info(lines.length ? lines.join('\n') : 'no saved sessions');
+          const sessions = await sessionSummaries(state.sessionsDir, 15);
+          if (!sessions.length) {
+            state.ui.info('no saved sessions');
+            return;
+          }
+          if (!state.rl?.choose) {
+            state.ui.info(sessions.map((s) => `${s.id === state.session.id ? '*' : ' '} ${s.id}  ${s.title}`).join('\n'));
+            return;
+          }
+          const options = sessions.map((s) => `${s.title}  ${s.id.slice(0, 19)}${s.id === state.session.id ? '  (current)' : ''}`);
+          const picked = await state.rl.choose({ title: 'Resume which session?', options });
+          if (picked < 0) return;
+          const chosen = sessions[picked];
+          state.setSession(await Session.open(chosen.file));
+          state.ui.info(`resumed ${chosen.id} (${state.session.messages.length} messages)`);
           return;
         }
         const id = args.replace(/\.jsonl$/, '');

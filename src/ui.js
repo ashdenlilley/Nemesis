@@ -3,7 +3,7 @@ import { accentOpen, bgOpen, colorDepth, RESET } from './theme.js';
 import { logoLines } from './logo.js';
 import { createFlow, createMarkdownStream } from './markdown.js';
 
-const CODES = { dim: '\x1b[2m', red: '\x1b[31m', green: '\x1b[32m', yellow: '\x1b[33m', bold: '\x1b[1m' };
+const CODES = { dim: '\x1b[2m', red: '\x1b[31m', green: '\x1b[32m', yellow: '\x1b[33m', bold: '\x1b[1m', cyan: '\x1b[36m' };
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
 
 // Short names for built-in tools in the feed, Claude Code style: ● Read(src/cli.js)
@@ -25,6 +25,14 @@ export const GHOST = [
   '████████',
   '█▀█▀▀█▀█',
 ];
+// Read-only calls collapse into one summary line per run; Ctrl+O shows what each one did.
+const CONDENSED = { read_file: 'read', glob: 'search', grep: 'search', web_fetch: 'fetch', web_search: 'search', skill: 'skill' };
+const PHRASE = {
+  read: (n) => `read ${n} file${n === 1 ? '' : 's'}`,
+  search: (n) => `searched ${n} pattern${n === 1 ? '' : 's'}`,
+  fetch: (n) => `fetched ${n} page${n === 1 ? '' : 's'}`,
+  skill: (n) => `loaded ${n} skill${n === 1 ? '' : 's'}`,
+};
 const DIFF_LINES = 8; // per side, before "… N more lines"
 
 // depth: 'truecolor' | '256' | 'basic' | 'none'. color: true/false overrides detection (tests).
@@ -72,7 +80,28 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
     if (midLine) writeOut('\n');
   };
 
+  let group = null; // open run of condensed calls: { items: [{ use, tool, outcome }] }
+  let lastGroup = null; // the run last summarized, for Ctrl+O
+
+  const summarizeGroup = (items) => {
+    const counts = {};
+    for (const { use } of items) counts[CONDENSED[use.name]] = (counts[CONDENSED[use.name]] ?? 0) + 1;
+    const text = Object.entries(counts).map(([k, n]) => PHRASE[k](n)).join(', ');
+    return text[0].toUpperCase() + text.slice(1);
+  };
+
+  // Writes the open run as one line. Called before any other output.
+  const flushGroup = () => {
+    if (!group) return;
+    const g = group;
+    group = null;
+    lastGroup = g;
+    startBlock('tool', err);
+    err.write(`${accentText('●')} ${summarizeGroup(g.items)} ${paint('dim', '(ctrl+o to expand)')}\n`);
+  };
+
   const startBlock = (kind, stream) => {
+    flushGroup();
     finishText();
     if (last !== null && last !== kind) stream.write('\n');
     if (last !== kind) held = '';
@@ -205,9 +234,27 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
       err.write(`${paint('dim', '─'.repeat(width()))}\n`);
     },
 
-    // Prompt box label.
-    prompt() {
+    // Prompt box label. '!' (shell) and '#' (note) get their own colors.
+    prompt(mode = null) {
+      if (mode === '!') return `${paintWith('\x1b[33m', '!')} `;
+      if (mode === '#') return `${paintWith(CODES.cyan, '#')} `;
       return `${paintWith(accent, '❯')} `;
+    },
+
+    // Ctrl+O: print what each call in the last condensed run did.
+    expandLast() {
+      flushGroup();
+      if (!lastGroup) {
+        err.write(`${paint('dim', 'nothing to expand')}\n`);
+        return;
+      }
+      for (const { use, tool, outcome } of lastGroup.items) {
+        err.write(`${callLine(use, tool)}\n`);
+        const text = String(outcome?.content ?? '').trim().split('\n');
+        const shown = text.slice(0, 6).map((l) => `      ${l.slice(0, Math.max(40, width() - 8))}`);
+        if (text.length > 6) shown.push(`      … +${text.length - 6} lines`);
+        err.write(`${paint(outcome?.isError ? 'red' : 'dim', shown.join('\n') || '      (no output)')}\n`);
+      }
     },
 
     // A submitted prompt, echoed into the feed on a shaded band. Follow-ups are echoed when they reach the model.
@@ -231,11 +278,21 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
     },
 
     toolCall(use, tool) {
+      if (CONDENSED[use.name]) {
+        group ??= { items: [] };
+        group.items.push({ use, tool, outcome: null });
+        return;
+      }
       const again = last === 'tool';
       startBlock('tool', err);
       err.write(`${again ? '\n' : ''}${callLine(use, tool)}\n`);
     },
     toolResult(use, outcome) {
+      if (CONDENSED[use.name] && group) {
+        const item = group.items.find((i) => i.use === use && !i.outcome);
+        if (item) item.outcome = outcome;
+        return;
+      }
       startBlock('tool', err);
       if (!outcome.isError && outcome.display) {
         const rows = renderDisplay(outcome.display);

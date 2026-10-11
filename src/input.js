@@ -218,6 +218,9 @@ export function createLineReader({ input = process.stdin, output = process.stdou
   let pending = ''; // keys pressed while no box was up
   let draft = null; // editor state of a watch box that closed with unsent text
   let status = null; // line drawn above the live area while a turn runs
+  let footer = null; // text drawn below the live area (a status line)
+  let history = []; // submitted prompts, oldest first
+  const keyHandlers = new Map(); // key sequence -> fn, active while a box is up
   const sigint = [];
   const cols = () => output.columns || 80;
 
@@ -243,13 +246,20 @@ export function createLineReader({ input = process.stdin, output = process.stdou
     const n = items.length;
     if (chunk === '\x1b[A' || chunk === '\x1bOA') st.suggestIndex = (st.suggestIndex + n - 1) % n;
     else if (chunk === '\x1b[B' || chunk === '\x1bOB') st.suggestIndex = (st.suggestIndex + 1) % n;
-    else if (chunk === '\t') {
-      st.text = `${items[st.suggestIndex].name} `;
+    else if (chunk === '\t' || chunk === '\r') {
+      // An item with apply(text) edits part of the text (a file path) and keeps typing; a plain item
+      // (a slash command) fills in on Tab and runs on Enter.
+      const it = items[st.suggestIndex];
+      if (it.apply) {
+        st.text = it.apply(st.text);
+        st.cur = st.text.length;
+        st.suggestFor = null;
+        paint();
+        return true;
+      }
+      st.text = chunk === '\t' ? `${it.name} ` : it.name;
       st.cur = st.text.length;
-    } else if (chunk === '\r') {
-      st.text = items[st.suggestIndex].name;
-      st.cur = st.text.length;
-      return false; // falls through to a normal submit
+      if (chunk === '\r') return false; // falls through to a normal submit
     } else if (chunk === '\x1b') st.dismissed = st.text;
     else return false;
     paint();
@@ -262,12 +272,18 @@ export function createLineReader({ input = process.stdin, output = process.stdou
       const lines = [s.title, ...s.options.map((opt, i) => (i === s.index ? `\x1b[1m❯ ${i + 1}. ${opt}\x1b[0m` : `  ${i + 1}. ${opt}`))];
       return { lines, row: 0, col: 0, below: lines.length - 1 };
     }
-    const { label, secret, st } = s;
+    const { secret, st } = s;
+    // Reverse search shows the matching history entry under its own label. labelFor(text) can change the
+    // label as the text changes (a "!" or "#" prefix).
+    const label = st.search
+      ? dim(`(reverse-search)\`${st.search.query}': `)
+      : (s.labelFor?.(st.text) ?? s.label);
     const prefixW = label.replace(ANSI, '').length;
     const width = Math.max(10, cols() - prefixW);
+    const shown = st.search ? (history[st.search.at] ?? '') : st.text;
     // Secret text shows as dots so a paste is visibly received.
-    const shownText = secret ? '•'.repeat(st.text.length) : st.text;
-    const { rows, cursorRow, cursorCol } = layout(shownText, st.cur, width);
+    const shownText = secret ? '•'.repeat(shown.length) : shown;
+    const { rows, cursorRow, cursorCol } = layout(shownText, st.search ? shownText.length : st.cur, width);
     const { start, end } = viewport(rows.length, cursorRow, st.top);
     st.top = start;
 
@@ -286,10 +302,11 @@ export function createLineReader({ input = process.stdin, output = process.stdou
   // The surface's rows with the status line above them.
   function area() {
     const s = surface();
-    if (!s) return status ? { lines: [status], row: 0, col: 0, below: 0 } : null;
+    const foot = footer ? footer.split('\n').map((l) => dim(l)) : [];
+    if (!s) return status || foot.length ? { lines: [...(status ? [status] : []), ...foot], row: 0, col: 0, below: foot.length } : null;
     const v = render(s);
-    if (!status) return v;
-    return { ...v, lines: [status, ...v.lines], row: v.row + 1 };
+    const top = status ? [status] : [];
+    return { ...v, lines: [...top, ...v.lines, ...foot], row: v.row + top.length, below: v.below + foot.length };
   }
 
   // Clear the live area, write `text` in its place, then draw the current surface below it.
@@ -395,8 +412,74 @@ export function createLineReader({ input = process.stdin, output = process.stdou
     paint();
   }
 
+  // Up/Down recall submitted prompts when the cursor is on the first/last line of the box.
+  function historyKey(s, chunk) {
+    const h = s.hist;
+    if (!h || !history.length) return false;
+    const st = s.st;
+    const setText = (text) => Object.assign(st, { text, cur: text.length, top: 0 });
+    if (chunk === '\x1b[A' || chunk === '\x1bOA') {
+      if (st.text.slice(0, st.cur).includes('\n')) return false;
+      if (h.index === history.length) h.draft = st.text;
+      if (h.index > 0) {
+        h.index--;
+        setText(history[h.index]);
+      }
+      paint();
+      return true;
+    }
+    if (chunk === '\x1b[B' || chunk === '\x1bOB') {
+      if (st.text.slice(st.cur).includes('\n') || h.index >= history.length) return false;
+      h.index++;
+      setText(h.index === history.length ? h.draft : history[h.index]);
+      paint();
+      return true;
+    }
+    return false;
+  }
+
+  // Ctrl+R: type to filter history, Ctrl+R again for an older match, Enter takes it, Esc keeps the draft.
+  const findMatch = (query, from) => {
+    for (let i = from; i >= 0; i--) if (history[i].includes(query)) return i;
+    return -1;
+  };
+  function searchKey(s, chunk) {
+    const st = s.st;
+    const search = st.search;
+    if (chunk === '\x12') {
+      const next = search.at > 0 ? findMatch(search.query, search.at - 1) : -1;
+      if (next !== -1) search.at = next;
+    } else if (chunk === '\r') {
+      if (search.at >= 0) st.text = history[search.at];
+      st.cur = st.text.length;
+      st.search = null;
+    } else if (chunk === '\x1b' || chunk === '\x03') {
+      st.search = null;
+    } else if (chunk === '\x7f') {
+      search.query = search.query.slice(0, -1);
+      search.at = findMatch(search.query, history.length - 1);
+    } else if (!/[\x00-\x1f\x7f]/.test(chunk)) {
+      // Printable text, one key or a fast burst of keys.
+      search.query += chunk;
+      search.at = findMatch(search.query, history.length - 1);
+    } else {
+      return false;
+    }
+    paint();
+    return true;
+  }
+
   function onData(chunk) {
     if (menu) return menuKey(chunk);
+    if ((line || watching) && keyHandlers.has(chunk)) return keyHandlers.get(chunk)();
+    if ((line || watching) && chunk === '\x12' && !(line ?? watching).st.search) {
+      const s = line ?? watching;
+      s.st.search = { query: '', at: history.length - 1 };
+      s.st.search.at = findMatch('', history.length - 1);
+      return paint();
+    }
+    if (line?.st.search) return searchKey(line, chunk) || paint();
+    if (watching?.st.search) return searchKey(watching, chunk) || paint();
     if (!line && !watching) {
       // No box up: Ctrl+C acts as SIGINT (raw mode stops the terminal sending it); other keys wait.
       if (chunk === '\x03' && !pending) {
@@ -409,6 +492,7 @@ export function createLineReader({ input = process.stdin, output = process.stdou
       return;
     }
     if (suggestionKey(line ?? watching, chunk)) return;
+    if (historyKey(line ?? watching, chunk)) return;
     if (line) {
       // Esc clears typed text; on an empty box it cancels the question.
       if (chunk === '\x1b') {
@@ -457,12 +541,12 @@ export function createLineReader({ input = process.stdin, output = process.stdou
     // Resolves with the entered text. secret: characters show as dots. leave: keep the box on screen.
     // complete(text) -> [{ name, description }] lists matches under the box.
     // Rejects with code 'INTERRUPT' (Ctrl+C on an empty box), 'CANCEL' (Esc on an empty box), or 'EOF' (Ctrl+D).
-    question(label, { secret = false, leave = true, complete = null } = {}) {
+    question(label, { secret = false, leave = true, complete = null, labelFor = null } = {}) {
       if (!input.isTTY) return Promise.reject(new Error('line input needs a terminal'));
       if (closed) return Promise.reject(eofError());
       if (line || menu) return Promise.reject(new Error('input is already waiting for a line'));
       return new Promise((resolve, reject) => {
-        line = { label, secret, leave, complete, resolve, reject, st: openEditor(secret) };
+        line = { label, secret, leave, complete, labelFor, resolve, reject, st: openEditor(secret), hist: { index: history.length, draft: '' } };
         paint();
         updateMode();
         replayPending();
@@ -481,12 +565,47 @@ export function createLineReader({ input = process.stdin, output = process.stdou
     },
 
     // Keeps a prompt box up while a turn runs. Enter calls onSubmit(text); Ctrl+C on an empty box calls onInterrupt().
-    watch({ label, onSubmit, onInterrupt, complete = null }) {
+    watch({ label, onSubmit, onInterrupt, complete = null, labelFor = null }) {
       if (!input.isTTY) return;
-      watching = { label, st: openEditor(false), onSubmit, onInterrupt, complete };
+      watching = { label, st: openEditor(false), onSubmit, onInterrupt, complete, labelFor, hist: { index: history.length, draft: '' } };
       paint();
       updateMode();
       replayPending();
+    },
+
+    // Prompts for Up/Down and Ctrl+R. addHistory skips empty entries and an immediate repeat.
+    setHistory(list) {
+      history = [...list];
+    },
+    addHistory(text) {
+      if (text && text !== history.at(-1)) history.push(text);
+    },
+
+    // A key (escape sequence or control character) that runs fn while a box is up, e.g. Ctrl+O.
+    onKey(key, fn) {
+      keyHandlers.set(key, fn);
+    },
+
+    // The text the next prompt box opens with (used by /rewind to put a prompt back for editing).
+    setDraft(text) {
+      draft = { text, cur: text.length, top: 0, pasting: false };
+    },
+
+    // Puts text into the box that is up, at the cursor (clipboard images, pasted paths).
+    insert(text) {
+      const s = line ?? watching;
+      if (!s) return false;
+      const { st } = s;
+      st.text = st.text.slice(0, st.cur) + text + st.text.slice(st.cur);
+      st.cur += text.length;
+      paint();
+      return true;
+    },
+
+    // Text under the live area, e.g. a status line. null removes it.
+    setFooter(text) {
+      footer = text || null;
+      if (input.isTTY && !closed) paint();
     },
 
     // Line above the live area (a spinner, say). null removes it.

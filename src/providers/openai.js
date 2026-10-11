@@ -30,7 +30,11 @@ export function toOpenAIMessages(system, messages) {
       out.push({ role: 'tool', tool_call_id: b.tool_use_id, content: b.content });
     }
     const text = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
-    if (text) out.push({ role: 'user', content: text });
+    const images = msg.content
+      .filter((b) => b.type === 'image')
+      .map((b) => ({ type: 'image_url', image_url: { url: `data:${b.source.media_type};base64,${b.source.data}` } }));
+    if (images.length) out.push({ role: 'user', content: [...(text ? [{ type: 'text', text }] : []), ...images] });
+    else if (text) out.push({ role: 'user', content: text });
   }
   return out;
 }

@@ -16,6 +16,12 @@ import { startMcpServers } from './mcp/manager.js';
 import { createSubagentRunner, createTaskOutputTool, createTaskTool, loadAgentDefs } from './subagents.js';
 import { createSkillTool, loadSkills, skillsPromptSection } from './skills.js';
 import { webTools } from './tools/web.js';
+import { buildUserContent, mentionCompletions } from './attach.js';
+import { appendHistory, appendNote, loadHistory, runStatusLine, shellNote } from './extras.js';
+import { clipboardImage } from './clipboard.js';
+import { Checkpoints } from './checkpoints.js';
+import { runCommand } from './tools/shell.js';
+import { scrubEnv } from './sandbox.js';
 import { createCommandRegistry, loadCustomCommands } from './commands/index.js';
 import { runOnboarding } from './onboarding.js';
 import { createUsage } from './usage.js';
@@ -125,6 +131,7 @@ async function createState({ args, cwd, home, rl, ui }) {
     hookContext: [],
     followUps: [], // prompts queued during a turn, sent after the next tool round
     controller: null,
+    attachments: [], // files attached with /paste, sent with the next prompt
     permissions: null,
     hooks: null,
     provider: null,
@@ -186,6 +193,13 @@ async function createState({ args, cwd, home, rl, ui }) {
 
   state.custom = await loadCustomCommands([path.join(nemesisHome(home), 'commands'), path.join(cwd, '.nemesis', 'commands')]);
   state.registry = createCommandRegistry(state);
+  // Checkpoints are per session: one file per session id, loaded when the session is first used.
+  const checkpointCache = new Map();
+  state.checkpoints = () => {
+    const id = state.session.id;
+    if (!checkpointCache.has(id)) checkpointCache.set(id, new Checkpoints(path.join(cwd, '.nemesis', 'checkpoints'), id));
+    return checkpointCache.get(id);
+  };
   state.setSession = (session) => { state.session = session; };
   state.setSession(await openSession(args, state.sessionsDir));
 
@@ -252,6 +266,7 @@ function startSpinner(rl, ui) {
 // Slash commands matching what is typed so far, for the prompt box's suggestion list.
 function commandCompleter(state) {
   return (text) => {
+    if (/(^|\s)@[^\s]*$/.test(text)) return mentionCompletions(text, { cwd: state.cwd });
     if (!/^\/\S*$/.test(text)) return [];
     const q = text.slice(1).toLowerCase();
     const items = [
@@ -272,9 +287,17 @@ async function runUserTurn(state, text, progress = null) {
     state.ui.error(`prompt blocked by hook: ${submit.reason}`);
     return false;
   }
-  const content = submit.context.length ? `${text}\n\n${submit.context.join('\n')}` : text;
+  // /paste attachments ride along as @mentions; @file mentions inline files or attach images.
+  const attached = state.attachments.splice(0).map((p) => `@${p}`);
+  const full = [text, ...attached].join(' ');
+  let content = await buildUserContent(full, { roots: state.roots });
+  if (submit.context.length) {
+    const extra = `\n\n${submit.context.join('\n')}`;
+    content = typeof content === 'string' ? content + extra : [...content.slice(0, -1), { type: 'text', text: content.at(-1).text + extra }];
+  }
   // A session saved mid tool call (crash, kill) has tool_use blocks with no results; the API rejects it.
   await settleDanglingToolUses(state.session);
+  await state.checkpoints().begin(state.session.messages.length, text);
   await state.session.append({ role: 'user', content });
 
   const controller = new AbortController();
@@ -294,7 +317,14 @@ async function runUserTurn(state, text, progress = null) {
       session: state.session,
       permissions: state.permissions,
       ui: state.ui,
-      ctx: { cwd: state.cwd, roots: state.roots, signal: controller.signal, config: state.config, subagents: state.subagents },
+      ctx: {
+        cwd: state.cwd,
+        roots: state.roots,
+        signal: controller.signal,
+        config: state.config,
+        subagents: state.subagents,
+        checkpoint: (abs) => state.checkpoints().record(abs),
+      },
       hooks: state.hooks,
       usage: state.usage,
       takeFollowUps: () => state.followUps.splice(0),
@@ -316,6 +346,23 @@ async function runUserTurn(state, text, progress = null) {
     const elapsed = progress?.stop() ?? null;
     state.ui.status(statusLine(state, elapsed));
   }
+}
+
+// The footer: the user's statusLine command output, when one is set.
+async function refreshFooter(state) {
+  if (!state.config.statusLine || !state.rl) return;
+  const t = state.usage.totals();
+  const payload = {
+    provider: state.config.provider,
+    model: state.config.model,
+    cwd: state.cwd,
+    session: state.session.id,
+    requests: t.requests,
+    tokens: { input: t.input, output: t.output, cacheRead: t.cacheRead },
+    contextWindow: state.config.contextWindow,
+    sandbox: state.config.sandbox,
+  };
+  state.rl.setFooter(await runStatusLine(state.config.statusLine, payload, { cwd: state.cwd }));
 }
 
 function statusLine(state, elapsedMs = null) {
@@ -365,7 +412,19 @@ async function runWatchedTurn(state, text) {
     return await runUserTurn(state, text, startSpinner(state.rl, state.ui));
   } finally {
     state.rl.unwatch();
+    refreshFooter(state);
   }
+}
+
+// "!cmd" runs a shell command now, without the model. Its output is kept as context for the next prompt.
+async function runShellMode(state, command) {
+  const strict = state.config.sandbox === 'strict';
+  const result = await runCommand(command, { cwd: state.cwd, env: strict ? scrubEnv() : undefined, timeoutMs: 120_000 });
+  const shown = result.output.trimEnd().split('\n');
+  state.ui.info(shown.slice(0, 40).join('\n') + (shown.length > 40 ? `\n… +${shown.length - 40} lines` : ''));
+  state.ui.info(state.ui.dim(result.timedOut ? 'timed out' : `exit ${result.code}`));
+  await settleDanglingToolUses(state.session);
+  await state.session.append({ role: 'user', content: shellNote(command, result) });
 }
 
 const isCancel = (err) => err?.name === 'AbortError' || ['CANCEL', 'INTERRUPT', 'EOF'].includes(err?.code);
@@ -419,6 +478,19 @@ async function runRepl(state) {
   });
   ui.info(ui.dim('  /help for commands · Esc or Ctrl+C stops a turn or command · Ctrl+C twice exits'));
 
+  rl.setHistory(await loadHistory(state.home));
+  // Up/Down and Ctrl+R use the saved prompts. Ctrl+O expands the last condensed tool run. Ctrl+V attaches a clipboard image.
+  const remember = async (text) => {
+    rl.addHistory(text);
+    await appendHistory(state.home, text).catch(() => {});
+  };
+  rl.onKey('\x0f', () => ui.expandLast());
+  rl.onKey('\x16', async () => {
+    const file = await clipboardImage(path.join(state.cwd, '.nemesis', 'clipboard')).catch(() => null);
+    if (file) rl.insert(`@${path.relative(state.cwd, file).split(path.sep).join('/')} `);
+  });
+  await refreshFooter(state);
+
   let leftover = null; // follow-ups not consumed by the last turn; they become the next prompt
   let lastCtrlC = 0;
   let showRule = true;
@@ -433,7 +505,11 @@ async function runRepl(state) {
         if (showRule) ui.rule();
         showRule = true;
         // The box clears on Enter; the feed shows the prompt.
-        raw = await rl.question(ui.prompt(), { leave: false, complete: commandCompleter(state) });
+        raw = await rl.question(ui.prompt(), {
+          leave: false,
+          complete: commandCompleter(state),
+          labelFor: (t) => ui.prompt(t[0] === '!' || t[0] === '#' ? t[0] : null),
+        });
       } catch (err) {
         if (err.code === 'CANCEL') {
           showRule = false;
@@ -452,12 +528,28 @@ async function runRepl(state) {
     }
     ui.userMessage(text);
 
+    if (text.length > 1 && (text[0] === '!' || text[0] === '#')) {
+      const body = text.slice(1).trim();
+      try {
+        if (text[0] === '!') await runShellMode(state, body);
+        else {
+          await appendNote(state.cwd, body);
+          ui.info(ui.dim(`noted in NEMESIS.md: ${body}`));
+        }
+      } catch (err) {
+        ui.error(err.message);
+      }
+      await remember(text);
+      continue;
+    }
     if (text.startsWith('/')) {
+      await remember(text);
       const prompt = await runSlashCommand(state, text);
       if (prompt) await runWatchedTurn(state, prompt);
       if (state.followUps.length) leftover = state.followUps.splice(0).join('\n\n');
       continue;
     }
+    await remember(text);
     await runWatchedTurn(state, text);
     if (state.followUps.length) leftover = state.followUps.splice(0).join('\n\n');
   }

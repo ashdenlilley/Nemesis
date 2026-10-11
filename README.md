@@ -22,13 +22,13 @@ Do not use `npm install -g nemesis`. The npm registry has an unrelated package w
 On a machine with the repo:
 
 ```sh
-npm pack                                     # writes nemesis-0.7.0.tgz
+npm pack                                     # writes nemesis-0.8.0.tgz
 ```
 
 Send the `.tgz` file to the user. They run:
 
 ```sh
-npm install -g ./nemesis-0.7.0.tgz
+npm install -g ./nemesis-0.8.0.tgz
 nemesis
 ```
 
@@ -84,7 +84,14 @@ Type `/help` for the live list. Custom commands come from `.nemesis/commands/*.m
 | `/agents` | list sub-agents |
 | `/mcp` | MCP server status and tools |
 | `/hooks` | configured hooks |
-| `/resume [id]` | list sessions, or switch to one |
+| `/resume [id]` | pick a session from a list (or switch to `<id>`) |
+| `/rename <title>` | name this session for the picker |
+| `/rewind` (`/undo`) | restore files, the conversation, or both to before an earlier prompt |
+| `/now` | during a turn: stop it and send the queued follow-ups now |
+| `/paste` (`/paste-image`) | attach the clipboard image to the next prompt |
+| `/skills` | list skills |
+| `/sandbox [off\|strict]` | strict: no keys in shell commands, network-looking commands refused |
+| `/mcp login <name>` | sign in to a remote MCP server (OAuth) |
 | `/export [file]` | export transcript to Markdown |
 | `/todos` | last task list written by the agent |
 | `/bug` (`/feedback`) | bug report hint |
@@ -148,15 +155,59 @@ Events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`,
 - A blocked `Stop` feeds its reason back to the model, and the turn continues.
 - Hooks run with your user privileges. Only add commands you trust. On Windows they run in PowerShell.
 
+## Input
+
+- `!command` runs a shell command now and keeps its output as context for the model. The prompt turns yellow.
+- `#note` appends a line to `NEMESIS.md`. The prompt turns cyan.
+- `@path` attaches a file (text is inlined; images are sent as image blocks). Tab completes paths.
+- Up and Down recall earlier prompts; Ctrl+R searches them.
+- Ctrl+O expands the last run of read-only tool calls (`Read 3 files, searched 2 patterns`).
+- Ctrl+V attaches a clipboard image where the terminal passes the key through. `/paste` does the same from a command.
+- Esc or Ctrl+C cancels a running turn or slash command. At an empty prompt, Ctrl+C twice exits.
+- A `statusLine` command in config is run after each turn; its first line is shown under the prompt.
+
+## Skills
+
+A skill is a folder with a `SKILL.md`, in `.nemesis/skills/<name>/` (project) or `~/.nemesis/skills/<name>/` (user). Its frontmatter gives `name` and `description`. Only the names and descriptions go into the system prompt; the `skill` tool loads the full instructions when the model needs them.
+
+## Permission rules
+
+Rules live in `allowRules` and `denyRules` (config), or in `/permissions allow|deny <rule>`. A rule is a tool name or `tool(pattern)`:
+
+- `bash(npm test:*)` allows `npm test` and `npm test -w app`, but not `npm testing`, and never a command that chains on with `;`, `&&`, `|` or `$(`.
+- Any other pattern is a glob where `*` matches anything: `read_file(src/*.ts)`.
+- A matching deny rule beats any allow.
+
+Setup can import the allow and deny lists from `~/.claude/settings.json`. Tools with no Nemesis equivalent are skipped.
+
+## Web
+
+`web_fetch` fetches an http(s) URL and returns its text. `web_search` uses Brave Search and needs `BRAVE_API_KEY`. Both ask before running by default.
+
+## Checkpoints
+
+Before `write_file` or `edit_file` changes a file, Nemesis keeps its earlier content, once per user turn. `/rewind` restores code, the conversation, or both. Files changed by shell commands are not tracked, so `/rewind` does not undo them.
+
+## Sub-agents in parallel and background
+
+Several `task` calls in one reply run together, and each prints its progress tagged with its name. `run_in_background: true` returns a task id at once; `task_output` collects the result. Esc stops the turn but not background tasks.
+
 ## MCP
 
-Configured under `mcpServers`. Servers start at launch over stdio (newline-delimited JSON-RPC):
+Configured under `mcpServers`. Two transports:
+
+- stdio: `command` (and optional `args`, `env`), newline-delimited JSON-RPC.
+- remote: `url` (Streamable HTTP). Headers may use `${VAR}` from the environment. For OAuth servers, run `/mcp login <name>`; tokens are kept in `~/.nemesis/mcp-auth.json` (mode 0600) and refreshed automatically.
+
+Servers start at launch. After `/mcp login`, Nemesis reconnects that server.
 
 ```json
 {
   "mcpServers": {
     "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] },
-    "local": { "command": "C:\\tools\\my-server.exe", "env": { "TOKEN": "..." }, "risk": "read" }
+    "local": { "command": "C:\\tools\\my-server.exe", "env": { "TOKEN": "..." }, "risk": "read" },
+    "github": { "url": "https://api.githubcopilot.com/mcp/", "headers": { "Authorization": "Bearer ${GITHUB_TOKEN}" } },
+    "linear": { "url": "https://mcp.linear.app/mcp", "oauth": true }
   }
 }
 ```
@@ -228,5 +279,9 @@ Do not put API keys in config files.
 - Live API calls were verified only against a local fake Anthropic SSE server. The OpenAI streaming path is covered by unit tests only.
 - The masked key prompt and onboarding were not exercised in an interactive terminal here.
 - Sub-agent intermediate text is hidden. Only its final report reaches the parent.
-- Changes to `mcpServers` and `hooks` take effect on restart, not on `/login`.
+- Changes to `hooks` take effect on restart. `mcpServers` changes need a restart too, except after `/mcp login`.
+- `sandbox: strict` is a guardrail. A command that avoids the listed network commands (a script, an unlisted tool) is not stopped, and nothing isolates the file system. Real isolation needs OS-level containment.
+- OAuth login and remote MCP were tested against a local fake server and a fake authorization flow, not against GitHub or another live provider.
+- Interactive features (the footer, `!`/`#` labels, Ctrl+R, the session and rewind pickers, clipboard images) were unit-tested with a fake terminal. They were not run in a live Windows Terminal session.
+- Image attachments are stored as base64 inside the session file, so sessions with images are larger.
 - Token counts are estimates (about 4 characters per token) used to decide when to compact.

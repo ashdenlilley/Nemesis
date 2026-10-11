@@ -55,6 +55,7 @@ export const writeFileTool = {
   target: (input) => input.path,
   async run({ path: p, content }, ctx) {
     const abs = resolveInWorkspace(ctx.roots ?? ctx.cwd, p);
+    await ctx.checkpoint?.(abs);
     await mkdir(path.dirname(abs), { recursive: true });
     await writeFile(abs, content, 'utf8');
     const lines = content.replace(/\n$/, '').split('\n');
@@ -86,6 +87,7 @@ export const editFileTool = {
     if (oldStr === '') throw new Error('old_string must not be empty');
     const abs = resolveInWorkspace(ctx.roots ?? ctx.cwd, p);
     const text = await readText(abs);
+    await ctx.checkpoint?.(abs);
     const count = text.split(oldStr).length - 1;
     if (count === 0) throw new Error('old_string not found in file');
     if (count > 1 && !all) {
