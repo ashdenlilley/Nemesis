@@ -20,6 +20,8 @@ import { buildUserContent, mentionCompletions } from './attach.js';
 import { appendHistory, appendNote, loadHistory, runStatusLine, shellNote } from './extras.js';
 import { clipboardImage } from './clipboard.js';
 import { Checkpoints } from './checkpoints.js';
+import { JobRegistry, createJobTools } from './jobs.js';
+import { manageProfiles } from './profiles.js';
 import { runCommand } from './tools/shell.js';
 import { scrubEnv } from './sandbox.js';
 import { createCommandRegistry, loadCustomCommands } from './commands/index.js';
@@ -41,6 +43,7 @@ Options:
   -r, --resume <id>         resume a session by id
   -m, --model <name>        model override
       --provider <name>     anthropic | openai
+      --profile <name>      use a saved profile (see /profile)
       --base-url <url>      API base URL override
       --max-steps <n>       cap tool-call rounds per turn (default: no limit)
       --no-stream           wait for full responses instead of streaming
@@ -75,6 +78,7 @@ export function parseArgs(argv) {
       case '--read-only': args.readOnly = true; break;
       case '--plan': args.plan = true; break;
       case '--setup': args.setup = true; break;
+      case '--profile': args.overrides.profile = take(i++, a); break;
       case '--no-stream': args.overrides.stream = false; break;
       case '-p': case '--prompt': args.prompt = take(i++, a); break;
       case '-r': case '--resume': args.resume = take(i++, a); break;
@@ -132,6 +136,7 @@ async function createState({ args, cwd, home, rl, ui }) {
     followUps: [], // prompts queued during a turn, sent after the next tool round
     controller: null,
     attachments: [], // files attached with /paste, sent with the next prompt
+    jobs: new JobRegistry(), // background shells
     permissions: null,
     hooks: null,
     provider: null,
@@ -168,7 +173,7 @@ async function createState({ args, cwd, home, rl, ui }) {
   // Tools every agent gets. Rebuilt when MCP servers change; sub-agents read the current list.
   state.startMcp = async () => {
     state.mcp = await startMcpServers(state.config.mcpServers, { cwd, ui, home });
-    state.baseTools = [...createBuiltinTools(), ...webTools, ...state.mcp.tools];
+    state.baseTools = [...createBuiltinTools(), ...webTools, ...createJobTools(state.jobs), ...state.mcp.tools];
     state.tools = [...state.baseTools, ...(state.taskTools ?? []), ...(state.skillTools ?? [])];
   };
   state.reconnectMcp = async () => {
@@ -204,6 +209,7 @@ async function createState({ args, cwd, home, rl, ui }) {
   state.setSession(await openSession(args, state.sessionsDir));
 
   state.shutdown = async () => {
+    state.jobs.killAll();
     await state.hooks.fire('SessionEnd', { reason: 'exit' }).catch(() => {});
     await state.mcp.close().catch(() => {});
     rl?.close();
@@ -323,6 +329,7 @@ async function runUserTurn(state, text, progress = null) {
         signal: controller.signal,
         config: state.config,
         subagents: state.subagents,
+        jobs: state.jobs,
         checkpoint: (abs) => state.checkpoints().record(abs),
       },
       hooks: state.hooks,
@@ -582,7 +589,13 @@ export async function main(argv) {
   try {
     if (args.setup) {
       if (!rl) throw new Error('--setup needs an interactive terminal');
-      await state.onboard(args.overrides.provider ?? null);
+      if (Object.keys(state.config.profiles ?? {}).length) {
+        // Profiles exist: add or edit them.
+        await manageProfiles({ rl, ui, home, profiles: { ...state.config.profiles } });
+        await state.reload();
+      } else {
+        await state.onboard(args.overrides.provider ?? null);
+      }
       await runPathSetup(rl, ui, home);
       return;
     }

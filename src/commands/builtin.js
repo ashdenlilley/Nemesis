@@ -6,6 +6,8 @@ import { compactSession, estimateTokens } from '../compact.js';
 import { buildSystemPrompt } from '../prompt.js';
 import { effectivePolicy, parseRuleSpec } from '../permissions.js';
 import { renameSession, sessionSummaries } from '../extras.js';
+import { manageProfile, profileSummary, removeUserProfile } from '../profiles.js';
+import { jobSummary } from '../jobs.js';
 import { clipboardImage } from '../clipboard.js';
 import { login } from '../mcp/oauth.js';
 import { SANDBOX_MODES } from '../sandbox.js';
@@ -38,7 +40,32 @@ export function parseTokenCount(text) {
 async function setProfileSetting(state, key, value) {
   state.config[key] = value;
   delete state.overrides[key];
-  await saveUserConfig({ profiles: { [state.config.provider]: { [key]: value } } }, state.home);
+  await saveUserConfig({ profiles: { [state.config.profile]: { [key]: value } } }, state.home);
+}
+
+// One row per profile and model: profiles with no model list show their current model.
+export function profileModelRows(profiles = {}, current = {}) {
+  const rows = [];
+  for (const [name, raw] of Object.entries(profiles)) {
+    const entry = !raw.provider && PROVIDERS[name] ? { ...raw, provider: name } : raw;
+    const provider = entry.provider ?? name;
+    const models = entry.models?.length ? entry.models : [entry.model ?? PROVIDERS[provider]?.defaultModel].filter(Boolean);
+    for (const model of models) {
+      const here = name === current.profile && model === current.model;
+      rows.push({ name, model, provider, label: `${name} · ${provider}/${model}${here ? '  (current)' : ''}` });
+    }
+  }
+  return rows;
+}
+
+// Make a profile active, optionally with a model. Clears command-line overrides, as /login does.
+export async function switchProfile(state, name, model = null) {
+  if (!state.config.profiles?.[name] && !PROVIDERS[name]) throw new Error(`no profile "${name}"; see /profile`);
+  const patch = { activeProfile: name };
+  if (model) patch.profiles = { [name]: { model } };
+  await saveUserConfig(patch, state.home);
+  state.overrides = state.overrides.maxSteps ? { maxSteps: state.overrides.maxSteps } : {};
+  await state.reload();
 }
 
 function memoryFile(state) {
@@ -188,8 +215,8 @@ export function builtinCommands() {
       name: 'logout',
       description: 'Remove the saved API key for the active provider',
       async run(_args, state) {
-        const { keyEnv } = PROVIDERS[state.config.provider];
-        await setEnvKeys({ [keyEnv]: null }, { home: state.home });
+        const { keyEnv } = state.config;
+        await setEnvKeys({ [keyEnv]: null }, { home: state.home, env: process.env });
         state.config.apiKey = null;
         state.ui.info(`removed ${keyEnv} from ~/.nemesis/.env. Run /login to add a key again.`);
       },
@@ -233,13 +260,32 @@ export function builtinCommands() {
     },
     {
       name: 'model',
-      description: 'Show or change the model [name]; remembered per provider',
+      description: 'Pick a profile and model [name sets the model of the current profile]',
       async run(args, state) {
         if (args) {
+          const models = [...new Set([...(state.config.models ?? []), args])];
           state.config.model = args;
-          await saveUserConfig({ profiles: { [state.config.provider]: { model: args } } }, state.home);
+          await saveUserConfig({ profiles: { [state.config.profile]: { model: args, models } } }, state.home);
+          state.ui.info(`model: ${state.config.profile} · ${state.config.provider}/${state.config.model}`);
+          return;
         }
-        state.ui.info(`model: ${state.config.provider}/${state.config.model}`);
+        if (!state.rl?.choose) {
+          state.ui.info(`model: ${state.config.profile} · ${state.config.provider}/${state.config.model}`);
+          return;
+        }
+        const rows = profileModelRows(state.config.profiles, state.config);
+        const picked = await state.rl.choose({
+          title: 'Switch profile and model',
+          options: [...rows.map((r) => r.label), 'Type a model for the current profile'],
+        });
+        if (picked < 0) return;
+        if (picked === rows.length) {
+          const typed = (await state.rl.question('Model: ')).trim();
+          if (!typed) return;
+          return builtinCommands().find((c) => c.name === 'model').run(typed, state);
+        }
+        await switchProfile(state, rows[picked].name, rows[picked].model);
+        state.ui.info(`now using ${rows[picked].name} · ${state.config.provider}/${state.config.model}`);
       },
     },
     {
@@ -266,6 +312,69 @@ export function builtinCommands() {
           return;
         }
         state.ui.info([...state.skills.values()].map((s) => `${s.name.padEnd(18)} ${s.description}`).join('\n'));
+      },
+    },
+    {
+      name: 'profile',
+      aliases: ['profiles'],
+      description: 'List profiles; /profile use|add|edit|rm <name>',
+      async run(args, state) {
+        const [verb = '', name = ''] = args.trim().split(/\s+/);
+        const profiles = state.config.profiles ?? {};
+        const current = () => `${state.config.profile} · ${state.config.provider}/${state.config.model}`;
+        if (!verb) {
+          state.ui.info(`${profileSummary(profiles, state.config.profile)}\nactive: ${current()}`);
+          return;
+        }
+        if (verb === 'use') {
+          if (!name) throw new Error('usage: /profile use <name>');
+          await switchProfile(state, name);
+          state.ui.info(`now using ${current()}`);
+          return;
+        }
+        if (!state.rl?.choose) throw new Error(`/profile ${verb} needs an interactive terminal`);
+        const ask = async (title) => (await state.rl.choose({ title, options: ['Yes', 'No'] })) === 0;
+        if (verb === 'add') {
+          const saved = await manageProfile({ rl: state.rl, ui: state.ui, home: state.home, takenNames: Object.keys(profiles) });
+          state.ui.info(`saved profile ${saved.name}`);
+          if (await ask(`Switch to ${saved.name} now?`)) await switchProfile(state, saved.name);
+          return;
+        }
+        if (verb === 'edit') {
+          if (!profiles[name]) throw new Error(`no profile "${name}"; see /profile`);
+          const saved = await manageProfile({ rl: state.rl, ui: state.ui, home: state.home, name, existing: profiles[name] });
+          state.ui.info(`saved profile ${saved.name}`);
+          await state.reload();
+          return;
+        }
+        if (verb === 'rm') {
+          if (!name) throw new Error('usage: /profile rm <name>');
+          if (name === state.config.profile) throw new Error(`"${name}" is active; switch to another profile first`);
+          if (!(await ask(`Remove profile ${name}? Its key stays in ~/.nemesis/.env.`))) return;
+          await removeUserProfile(state.home, name);
+          state.ui.info(`removed profile ${name}`);
+          return;
+        }
+        throw new Error('usage: /profile [use|add|edit|rm <name>]');
+      },
+    },
+    {
+      name: 'jobs',
+      description: 'List background shells; /jobs show <id> or /jobs kill <id>',
+      run(args, state) {
+        const [verb = '', id = ''] = args.trim().split(/\s+/);
+        if (verb === 'kill') {
+          if (!id) throw new Error('usage: /jobs kill <id>');
+          state.ui.info(state.jobs.kill(id) ? `stopped ${id}` : `${id} was not running`);
+          return;
+        }
+        if (verb === 'show') {
+          if (!id) throw new Error('usage: /jobs show <id>');
+          const job = state.jobs.get(id);
+          state.ui.info(`${id} ${job.status}${job.code !== null ? ` (exit ${job.code})` : ''}\n${job.output.slice(-4000).trimEnd() || '(no output)'}`);
+          return;
+        }
+        state.ui.info(jobSummary(state.jobs));
       },
     },
     {

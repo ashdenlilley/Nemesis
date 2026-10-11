@@ -22,13 +22,13 @@ Do not use `npm install -g nemesis`. The npm registry has an unrelated package w
 On a machine with the repo:
 
 ```sh
-npm pack                                     # writes nemesis-0.8.0.tgz
+npm pack                                     # writes nemesis-0.9.0.tgz
 ```
 
 Send the `.tgz` file to the user. They run:
 
 ```sh
-npm install -g ./nemesis-0.8.0.tgz
+npm install -g ./nemesis-0.9.0.tgz
 nemesis
 ```
 
@@ -92,6 +92,9 @@ Type `/help` for the live list. Custom commands come from `.nemesis/commands/*.m
 | `/skills` | list skills |
 | `/sandbox [off\|strict]` | strict: no keys in shell commands, network-looking commands refused |
 | `/mcp login <name>` | sign in to a remote MCP server (OAuth) |
+| `/model` | pick a profile and model from a menu (or `/model <name>` for this profile's model) |
+| `/profile` | list profiles; `/profile use\|add\|edit\|rm <name>` |
+| `/jobs` | list background shells; `/jobs show\|kill <id>` |
 | `/export [file]` | export transcript to Markdown |
 | `/todos` | last task list written by the agent |
 | `/bug` (`/feedback`) | bug report hint |
@@ -154,6 +157,29 @@ Events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`,
 - Plain stdout from `SessionStart` or `UserPromptSubmit` is added as context.
 - A blocked `Stop` feeds its reason back to the model, and the turn continues.
 - Hooks run with your user privileges. Only add commands you trust. On Windows they run in PowerShell.
+
+## Profiles
+
+A profile is a named provider setup: provider, base URL, one or more models, and the variable its key lives in. Use several at once: a Claude account, a hosted OpenAI-compatible endpoint, a local Ollama or LM Studio server.
+
+```json
+{
+  "activeProfile": "lab",
+  "profiles": {
+    "claude": { "provider": "anthropic", "models": ["claude-opus-5-5", "claude-sonnet-5-5"], "model": "claude-opus-5-5" },
+    "lab": { "provider": "openai", "baseUrl": "http://10.0.0.5:8000/v1", "models": ["qwen2.5-coder", "llama3"], "model": "qwen2.5-coder", "keyless": true }
+  }
+}
+```
+
+- Keys are stored in `~/.nemesis/.env` under the profile's `keyEnv` (`NEMESIS_KEY_<NAME>` for new profiles). `keyless: true` is for servers that need no key.
+- `/model` switches profile and model together. `/profile add` creates one, `/profile edit <name>` changes it (blank key keeps the saved key), `/profile rm <name>` removes the entry.
+- `nemesis --setup` lists profiles to add or edit. `--profile <name>` or `NEMESIS_PROFILE` picks one for a run.
+- Entries written before profiles existed, keyed by provider name, still work.
+
+## Background shells
+
+`bash` with `run_in_background: true` starts a command and returns a shell id at once. `bash_output` reads new output (`wait_ms` waits for it to finish) and `kill_shell` stops it along with the processes it started. `/jobs` lists them. Background shells end when Nemesis exits. Sandbox rules apply to them too.
 
 ## Input
 
@@ -279,6 +305,7 @@ Do not put API keys in config files.
 - Live API calls were verified only against a local fake Anthropic SSE server. The OpenAI streaming path is covered by unit tests only.
 - The masked key prompt and onboarding were not exercised in an interactive terminal here.
 - Sub-agent intermediate text is hidden. Only its final report reaches the parent.
+- Background shells on Windows: a command started and stopped within the first 1.5 seconds may leave a child process behind; the kill waits for that window before stopping the tree. Shells still running when Nemesis exits are not killed if the exit comes within that window.
 - Changes to `hooks` take effect on restart. `mcpServers` changes need a restart too, except after `/mcp login`.
 - `sandbox: strict` is a guardrail. A command that avoids the listed network commands (a script, an unlisted tool) is not stopped, and nothing isolates the file system. Real isolation needs OS-level containment.
 - OAuth login and remote MCP were tested against a local fake server and a fake authorization flow, not against GitHub or another live provider.

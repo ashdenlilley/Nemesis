@@ -74,17 +74,23 @@ export const bashTool = {
     properties: {
       command: { type: 'string', description: 'Command to run' },
       timeout_ms: { type: 'integer', description: `Timeout in ms (default ${DEFAULT_TIMEOUT_MS}, max ${MAX_TIMEOUT_MS})` },
+      run_in_background: { type: 'boolean', description: 'Start it and return at once; read output with bash_output, stop with kill_shell. For servers, watchers, long builds.' },
     },
     required: ['command'],
   },
   describeCall: (input) => getFirstLine(input.command, 120),
   target: (input) => input.command,
-  async run({ command, timeout_ms: timeoutMs = DEFAULT_TIMEOUT_MS }, ctx) {
+  async run({ command, timeout_ms: timeoutMs = DEFAULT_TIMEOUT_MS, run_in_background: background = false }, ctx) {
     const timeout = Math.min(Math.max(1, timeoutMs), MAX_TIMEOUT_MS);
     const strict = ctx.config?.sandbox === 'strict';
     if (strict) {
       const network = networkCommand(command);
       if (network) throw new Error(`blocked by sandbox (strict): "${network}" may use the network. Run /sandbox off to allow it.`);
+    }
+    if (background) {
+      if (!ctx.jobs) throw new Error('background shells are not available in this context');
+      const job = ctx.jobs.start(command, { cwd: ctx.cwd, env: strict ? scrubEnv() : undefined });
+      return `started background shell ${job.id}: ${command}. Read its output with bash_output (id ${job.id}); stop it with kill_shell.`;
     }
     const { code, timedOut, output } = await runCommand(command, {
       cwd: ctx.cwd,

@@ -1,6 +1,6 @@
 {
   "name": "nemesis",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Terminal agentic coding harness: tool-using LLM agent with permissions and resumable sessions",
   "type": "module",
   "private": true,

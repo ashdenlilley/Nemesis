@@ -32,6 +32,7 @@ export const DEFAULTS = Object.freeze({
   provider: 'anthropic',
   maxTokens: 8192,
   maxSteps: null, // tool rounds per turn; null = no limit (Esc or Ctrl+C stops a turn)
+  activeProfile: null, // name of the profile in use; null means the provider's own profile
   stream: true,
   idleTimeoutSec: 120, // a model request with no data for this long is dropped and retried
   effort: null,
@@ -96,17 +97,37 @@ export async function loadConfig({ cwd, home = homedir(), env = process.env, ove
   if (env.NEMESIS_PROVIDER) fromEnv.provider = env.NEMESIS_PROVIDER;
   if (env.NEMESIS_MODEL) fromEnv.model = env.NEMESIS_MODEL;
   if (env.NEMESIS_BASE_URL) fromEnv.baseUrl = env.NEMESIS_BASE_URL;
+  if (env.NEMESIS_PROFILE) fromEnv.profile = env.NEMESIS_PROFILE;
 
   const merged = [user, project, local, fromEnv, overrides].reduce(mergeLayer, structuredClone(DEFAULTS));
-  const meta = PROVIDERS[merged.provider];
-  if (!meta) {
-    throw new Error(`unknown provider "${merged.provider}" (expected: ${Object.keys(PROVIDERS).join(', ')})`);
-  }
 
-  const provider = merged.provider;
-  const profile = merged.profiles[provider] ?? {};
+  // A profile is a named set of provider settings (provider, baseUrl, models, keyEnv, keyless, ...).
+  // Choosing a provider on the command line without a profile picks that provider's profile.
+  const explicitProvider = overrides.provider ?? fromEnv.provider;
+  const chosen = overrides.profile ?? fromEnv.profile
+    ?? (explicitProvider ? null : pick(local.activeProfile, project.activeProfile, user.activeProfile));
+  const name = chosen ?? explicitProvider ?? merged.provider;
+  // A profile named on the command line or in NEMESIS_PROFILE must exist. A stale activeProfile falls back instead.
+  const named = overrides.profile ?? fromEnv.profile;
+  if (named && !merged.profiles[named] && !PROVIDERS[named]) {
+    throw new Error(`no profile "${named}". Add it with /profile add, or see /profile`);
+  }
+  // Entries written before profiles existed are keyed by provider name and have no provider field.
+  const raw = merged.profiles[name] ?? {};
+  const entry = !raw.provider && PROVIDERS[name] ? { ...raw, provider: name } : raw;
+
+  const provider = pick(overrides.provider, fromEnv.provider, entry.provider, merged.provider);
+  const meta = PROVIDERS[provider];
+  if (!meta) {
+    throw new Error(`unknown provider "${provider}" (expected: ${Object.keys(PROVIDERS).join(', ')})`);
+  }
+  // Profile values apply only when the profile's provider is the provider in use.
+  const profile = entry.provider === provider ? entry : {};
   const scoped = (layer, key) => (!layer.provider || layer.provider === provider ? layer[key] : undefined);
 
+  merged.profile = name;
+  merged.provider = provider;
+  merged.models = profile.models ?? [];
   merged.model = pick(
     overrides.model, fromEnv.model,
     scoped(local, 'model'), scoped(project, 'model'),
@@ -117,11 +138,13 @@ export async function loadConfig({ cwd, home = homedir(), env = process.env, ove
     scoped(local, 'baseUrl'), scoped(project, 'baseUrl'),
     profile.baseUrl, meta.defaultBaseUrl,
   );
-  // Model-dependent settings saved by /context-window, /effort and /reasoning live in the provider's profile.
+  // Model-dependent settings saved by /context-window, /effort and /reasoning live in the profile.
   merged.contextWindow = pick(overrides.contextWindow, profile.contextWindow, merged.contextWindow, meta.contextWindow);
   merged.effort = pick(overrides.effort, profile.effort, merged.effort) ?? null;
   merged.reasoning = pick(overrides.reasoning, profile.reasoning, merged.reasoning) ?? null;
-  merged.apiKey = pick(env[meta.keyEnv], env.NEMESIS_API_KEY) ?? null;
+  merged.keyEnv = profile.keyEnv ?? meta.keyEnv;
+  // Local servers that need no key get a placeholder, since the API client insists on one.
+  merged.apiKey = profile.keyless ? 'local' : (pick(env[merged.keyEnv], env.NEMESIS_API_KEY) ?? null);
   return merged;
 }
 

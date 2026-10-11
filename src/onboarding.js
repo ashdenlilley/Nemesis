@@ -77,7 +77,7 @@ export async function runOnboarding({ rl, ui, home, env = process.env, preferred
 
   await setEnvKeys({ [meta.keyEnv]: key }, { home, env });
   const profile = provider === 'openai' ? { model, baseUrl } : { model };
-  await saveUserConfig({ provider, profiles: { [provider]: profile } }, home);
+  await saveUserConfig({ provider, activeProfile: provider, profiles: { [provider]: profile } }, home);
 
   if (rl.choose) {
     const picked = await rl.choose({ title: 'How much may Nemesis do without asking?', options: PERMISSION_PRESETS.map((p) => p.label) });
