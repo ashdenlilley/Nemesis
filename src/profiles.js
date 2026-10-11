@@ -66,7 +66,7 @@ export async function profileWizard({ rl, ui, home, env = process.env, name = nu
 
   let profileName = name;
   if (!profileName) {
-    profileName = (await rl.question('Profile name (e.g. claude, ollama, lab-server): ')).trim().toLowerCase();
+    profileName = (await rl.question('Profile name (e.g. claude, ollama, lab-server): ')).trim().toLowerCase().replace(/\s+/g, '-');
     if (!PROFILE_NAME.test(profileName)) throw new Error('profile names use a-z, 0-9 and dashes, and start with a letter or digit');
     if (takenNames.includes(profileName)) throw new Error(`profile "${profileName}" already exists; use /profile edit ${profileName}`);
   }

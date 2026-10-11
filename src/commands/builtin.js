@@ -337,6 +337,8 @@ export function builtinCommands() {
         if (verb === 'add') {
           const saved = await manageProfile({ rl: state.rl, ui: state.ui, home: state.home, takenNames: Object.keys(profiles) });
           state.ui.info(`saved profile ${saved.name}`);
+          // Reload first: the new profile is not in the config this session loaded at startup.
+          await state.reload();
           if (await ask(`Switch to ${saved.name} now?`)) await switchProfile(state, saved.name);
           return;
         }

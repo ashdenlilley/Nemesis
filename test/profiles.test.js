@@ -205,3 +205,28 @@ test('a profile named on the command line must exist', async () => {
   const home = await tempDir('nemesis-prof4-');
   await assert.rejects(loadConfig({ cwd: home, home, env: {}, overrides: { profile: 'ghost' } }), /no profile "ghost"/);
 });
+
+test('/profile add: the new profile can be switched to straight after it is saved', async () => {
+  const { builtinCommands } = await import('../src/commands/builtin.js');
+  const home = await tempDir('nemesis-add-');
+  const cwd = await tempDir('nemesis-add-cwd-');
+  await saveUserConfig({ activeProfile: 'lab', profiles: { lab: { provider: 'openai', baseUrl: 'http://x/v1', model: 'qwen', keyless: true } } }, home);
+  const answers = ['Claude API', '1', 'claude-haiku-5-5', 'sk-test'];
+  const choices = [0]; // switch now: Yes
+  const rl = {
+    async question() { return answers.shift() ?? ''; },
+    async choose() { return choices.shift() ?? -1; },
+  };
+  const state = { home, cwd, rl, overrides: {}, config: {}, ui: quietUI(), env: {} };
+  state.reload = async () => { state.config = await loadConfig({ cwd, home, env: process.env, overrides: state.overrides }); };
+  await state.reload();
+  const cmd = builtinCommands().find((c) => c.name === 'profile');
+  const saveKey = process.env.NEMESIS_KEY_CLAUDE_API;
+  try {
+    await cmd.run('add', state);
+  } finally {
+    if (saveKey === undefined) delete process.env.NEMESIS_KEY_CLAUDE_API;
+  }
+  assert.equal(state.config.profile, 'claude-api');
+  assert.equal(state.config.model, 'claude-haiku-5-5');
+});
