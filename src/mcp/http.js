@@ -83,7 +83,7 @@ export class McpHttpClient {
     const init = await this.request('initialize', {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: 'nemesis', version: '0.11.1' },
+      clientInfo: { name: 'nemesis', version: '0.12.0' },
     });
     this.serverInfo = init.serverInfo ?? {};
     await this.notify('notifications/initialized');

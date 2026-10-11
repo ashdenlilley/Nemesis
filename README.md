@@ -22,15 +22,26 @@ Do not use `npm install -g nemesis`. The npm registry has an unrelated package w
 On a machine with the repo:
 
 ```sh
-npm pack                                     # writes nemesis-0.11.1.tgz
+npm pack                                     # writes nemesis-0.12.0.tgz
 ```
 
 Send the `.tgz` file to the user. They run:
 
 ```sh
-npm install -g ./nemesis-0.11.1.tgz
+npm install -g ./nemesis-0.12.0.tgz
 nemesis
 ```
+
+#### macOS (unsigned npm package)
+
+Nemesis is a Node package with no native binary, so there is nothing to sign or notarize and Gatekeeper does not block it. Install Node 20+ (`brew install node`), then either command above works:
+
+```sh
+npm install -g github:ashdenlilley/Nemesis      # or: npm install -g ./nemesis-0.12.0.tgz
+nemesis --version                               # 0.12.0
+```
+
+npm puts the `nemesis` launcher in `$(npm prefix -g)/bin`. The first run offers to add that directory to `~/.zshrc` (or `~/.bashrc`). For clipboard images on macOS, install `pngpaste` (`brew install pngpaste`). Without it, `/paste` reports that no clipboard tool is available.
 
 Requires Node 20+. No git or GitHub access needed. Upgrade by installing the newer `.tgz` the same way.
 
