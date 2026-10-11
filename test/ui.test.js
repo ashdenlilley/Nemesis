@@ -63,3 +63,11 @@ test('banner prints the logo rows with session info beside them', () => {
   assert.match(lines.join('\n'), /Nemesis 0\.2\.0/);
   assert.match(lines.join('\n'), /openai\/gpt-4o/);
 });
+
+test('streamed text chunks join on one line instead of each starting a new line', () => {
+  const out = buffer();
+  const ui = createUI({ out, err: out, color: false });
+  for (const c of ['Hello! I', "'m Nemesis", ', ready', '\n\nNext paragraph']) ui.streamText(c);
+  ui.endStream();
+  assert.equal(out.text, "Hello! I'm Nemesis, ready\n\nNext paragraph\n");
+});

@@ -34,8 +34,11 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
     const trailing = /\n*$/.exec(chunk)[0];
     let core = chunk.slice(0, chunk.length - trailing.length);
     if (core) {
-      if (last !== 'text') core = core.replace(/^\n+/, '');
-      startBlock('text', out);
+      // A new block starts on a fresh line; a continuing one picks up mid-line where the last chunk ended.
+      if (last !== 'text') {
+        core = core.replace(/^\n+/, '');
+        startBlock('text', out);
+      }
       out.write(held + core);
       held = '';
       midLine = true;
