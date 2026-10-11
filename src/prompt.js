@@ -27,6 +27,7 @@ export async function buildSystemPrompt({
   base = BASE_PROMPT,
   outputStyle = 'default',
   extra = [],
+  skills = '',
 }) {
   const parts = [
     base,
@@ -34,6 +35,7 @@ export async function buildSystemPrompt({
   ];
   if (STYLE_PROMPTS[outputStyle]) parts.push(STYLE_PROMPTS[outputStyle]);
   if (extra.length) parts.push(`Context from hooks:\n${extra.join('\n')}`);
+  if (skills) parts.push(skills);
 
   for (const name of INSTRUCTION_FILES) {
     try {

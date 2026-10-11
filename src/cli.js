@@ -13,7 +13,9 @@ import { createUI } from './ui.js';
 import { createLineReader } from './input.js';
 import { createHooks } from './hooks.js';
 import { startMcpServers } from './mcp/manager.js';
-import { createSubagentRunner, createTaskTool, loadAgentDefs } from './subagents.js';
+import { createSubagentRunner, createTaskOutputTool, createTaskTool, loadAgentDefs } from './subagents.js';
+import { createSkillTool, loadSkills, skillsPromptSection } from './skills.js';
+import { webTools } from './tools/web.js';
 import { createCommandRegistry, loadCustomCommands } from './commands/index.js';
 import { runOnboarding } from './onboarding.js';
 import { createUsage } from './usage.js';
@@ -151,22 +153,36 @@ async function createState({ args, cwd, home, rl, ui }) {
     policy: effectivePolicy({ config: state.config, planMode: state.planMode, readOnly: args.readOnly }),
     autoApprove: args.yes,
     choose: rl ? (spec) => rl.choose(spec) : null,
+    allow: state.config.allowRules ?? [],
+    deny: state.config.denyRules ?? [],
   });
   state.hooks = createHooks(state.config, { cwd, getSessionId: () => state.session?.id ?? null });
 
-  state.mcp = await startMcpServers(state.config.mcpServers, { cwd, ui });
+  // Tools every agent gets. Rebuilt when MCP servers change; sub-agents read the current list.
+  state.startMcp = async () => {
+    state.mcp = await startMcpServers(state.config.mcpServers, { cwd, ui, home });
+    state.baseTools = [...createBuiltinTools(), ...webTools, ...state.mcp.tools];
+    state.tools = [...state.baseTools, ...(state.taskTools ?? []), ...(state.skillTools ?? [])];
+  };
+  state.reconnectMcp = async () => {
+    await state.mcp?.close().catch(() => {});
+    await state.startMcp();
+  };
+  state.skills = await loadSkills([path.join(nemesisHome(home), 'skills'), path.join(cwd, '.nemesis', 'skills')]);
+  state.skillTools = state.skills.size ? [createSkillTool(state.skills)] : [];
   state.agents = await loadAgentDefs([path.join(nemesisHome(home), 'agents'), path.join(cwd, '.nemesis', 'agents')]);
-  const baseTools = [...createBuiltinTools(), ...state.mcp.tools];
+  await state.startMcp();
   state.subagents = createSubagentRunner({
     agents: state.agents,
-    allTools: baseTools,
+    allTools: () => state.baseTools,
     getRuntime: () => ({ provider: state.provider, config: state.config }),
     permissions: state.permissions,
     ui,
     hooks: state.hooks,
     cwd,
   });
-  state.tools = [...baseTools, createTaskTool(state.subagents)];
+  state.taskTools = [createTaskTool(state.subagents), createTaskOutputTool(state.subagents)];
+  state.tools = [...state.baseTools, ...state.taskTools, ...state.skillTools];
 
   state.custom = await loadCustomCommands([path.join(nemesisHome(home), 'commands'), path.join(cwd, '.nemesis', 'commands')]);
   state.registry = createCommandRegistry(state);
@@ -268,6 +284,7 @@ async function runUserTurn(state, text, progress = null) {
       cwd: state.cwd,
       outputStyle: state.config.outputStyle,
       extra: state.hookContext,
+      skills: skillsPromptSection(state.skills),
     });
     await runAgentTurn({
       provider: state.provider,

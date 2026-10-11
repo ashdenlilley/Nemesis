@@ -75,15 +75,19 @@ function lastAssistantText(session) {
 // allTools must exclude the task tool itself, which caps delegation at one level.
 // getRuntime() returns the live { provider, config } so /login and /model take effect.
 export function createSubagentRunner({ agents, allTools, getRuntime, permissions, ui, hooks, cwd }) {
+  const background = new Map();
+  // allTools may be a function, so tools added after startup (MCP login) reach later sub-agents.
   return {
     agents,
+    background,
     async run({ agentName, prompt }, ctx) {
       const def = agents.get(agentName);
       if (!def) {
         throw new Error(`unknown agent "${agentName}". available: ${[...agents.keys()].join(', ')}`);
       }
       const { provider, config } = getRuntime();
-      const tools = def.tools === '*' ? allTools : allTools.filter((t) => def.tools.includes(t.name));
+      const pool = typeof allTools === 'function' ? allTools() : allTools;
+      const tools = def.tools === '*' ? pool : pool.filter((t) => def.tools.includes(t.name));
       const session = Session.memory();
       await session.append({ role: 'user', content: prompt });
       const system = await buildSystemPrompt({ cwd, base: def.prompt, outputStyle: config.outputStyle });
@@ -106,22 +110,66 @@ export function createSubagentRunner({ agents, allTools, getRuntime, permissions
   };
 }
 
+// Background runs keep going while the parent turn continues. They are read with task_output.
+// Each entry: { description, done, result, error, promise }, kept in runner.background.
 export function createTaskTool(runner) {
   const list = [...runner.agents.values()].map((a) => `${a.name} (${a.description})`).join('; ');
+  const background = runner.background;
+  let nextId = background.size + 1;
   return {
     name: 'task',
     risk: 'read',
-    description: `Delegate a self-contained task to a sub-agent with its own context window. Only its final report returns to you, so use it for broad searches or independent sub-tasks. The sub-agent sees nothing except the prompt you give it. Agents: ${list}`,
+    concurrent: true,
+    description: `Delegate a self-contained task to a sub-agent with its own context window. Only its final report returns to you, so use it for broad searches or independent sub-tasks. The sub-agent sees nothing except the prompt you give it. Several task calls in one reply run in parallel. Set run_in_background to keep working while it runs, then collect it with task_output. Agents: ${list}`,
     parameters: {
       type: 'object',
       properties: {
         description: { type: 'string', description: 'Short label, 3-6 words' },
         prompt: { type: 'string', description: 'Complete instructions, including every fact the sub-agent needs' },
         subagent_type: { type: 'string', description: 'Agent name; default general' },
+        run_in_background: { type: 'boolean', description: 'Return at once with a task id instead of waiting' },
       },
       required: ['prompt'],
     },
     describeCall: (input) => `${input.subagent_type ?? 'general'}: ${input.description ?? input.prompt}`.slice(0, 120),
-    run: (input, ctx) => runner.run({ agentName: input.subagent_type ?? 'general', prompt: input.prompt }, ctx),
+    async run(input, ctx) {
+      const agentName = input.subagent_type ?? 'general';
+      if (!input.run_in_background) return runner.run({ agentName, prompt: input.prompt }, ctx);
+      const id = `task-${nextId++}`;
+      const entry = { description: input.description ?? agentName, done: false, result: null, error: null };
+      // Not tied to the parent turn: Esc stops the turn, not the background work.
+      entry.promise = runner.run({ agentName, prompt: input.prompt }, { ...ctx, signal: undefined })
+        .then((text) => Object.assign(entry, { done: true, result: text }))
+        .catch((err) => Object.assign(entry, { done: true, error: err.message }));
+      background.set(id, entry);
+      return `started background task ${id} (${entry.description}). Collect it with task_output.`;
+    },
+  };
+}
+
+export function createTaskOutputTool(runner) {
+  const background = runner.background;
+  return {
+    name: 'task_output',
+    risk: 'read',
+    concurrent: true,
+    description: 'Get the result of a background task started with task run_in_background. Set wait to block until it finishes.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Task id, e.g. task-1' },
+        wait: { type: 'boolean', description: 'Wait for completion (default false)' },
+      },
+      required: ['id'],
+    },
+    describeCall: (input) => input.id,
+    async run({ id, wait = false }) {
+      const entry = background.get(id);
+      if (!entry) throw new Error(`no background task "${id}"; known: ${[...background.keys()].join(', ') || 'none'}`);
+      if (wait) await entry.promise;
+      if (!entry.done) return `${id} is still running (${entry.description})`;
+      if (entry.error) throw new Error(`${id} failed: ${entry.error}`);
+      return entry.result;
+    },
   };
 }

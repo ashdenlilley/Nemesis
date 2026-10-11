@@ -44,6 +44,34 @@ export async function executeToolUse(use, { toolMap, permissions, ctx, hooks = n
   return outcome;
 }
 
+// JSON with sorted keys, so the same input always produces the same string.
+export function stableJson(value) {
+  return JSON.stringify(value, (_, v) => (v && typeof v === 'object' && !Array.isArray(v)
+    ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]]))
+    : v));
+}
+
+// Stops a turn that keeps making the same call and getting the same result. The warning is added to
+// the tool result so the model sees it; the turn stops at stopAt repeats.
+export function createLoopGuard({ warnAt = 3, stopAt = 6 } = {}) {
+  let last = null;
+  let count = 0;
+  return {
+    note(use, outcome) {
+      const key = `${use.name}\u0000${stableJson(use.input ?? {})}\u0000${outcome.isError ? 'E' : 'O'}${outcome.content}`;
+      count = key === last ? count + 1 : 1;
+      last = key;
+      if (count === stopAt) {
+        return { stop: true, text: `\n[nemesis] This exact call has returned the same result ${count} times in a row. The turn is being stopped.` };
+      }
+      if (count === warnAt) {
+        return { stop: false, text: `\n[nemesis] This exact call has returned the same result ${count} times in a row. Try a different approach instead of repeating it.` };
+      }
+      return null;
+    },
+  };
+}
+
 // Every tool_use needs a matching tool_result or the next API call is rejected.
 // Called when a turn is interrupted mid-tool.
 export async function settleDanglingToolUses(session, reason = 'Interrupted before tool completed') {
@@ -171,9 +199,26 @@ export async function runAgentTurn({
 
       const results = [];
       progress?.phase('tool');
-      for (const use of uses) {
-        ui.toolCall(use, toolMap.get(use.name));
-        const outcome = await executeToolUse(use, { toolMap, permissions, ctx, hooks });
+      const runOne = (use) => executeToolUse(use, { toolMap, permissions, ctx, hooks });
+      // Calls that all declare concurrent (sub-agents, fetches) run together; otherwise one at a time.
+      const concurrent = uses.length > 1 && uses.every((u) => toolMap.get(u.name)?.concurrent);
+      let outcomes = [];
+      if (concurrent) {
+        uses.forEach((use) => ui.toolCall(use, toolMap.get(use.name)));
+        outcomes = await Promise.all(uses.map(runOne));
+      }
+      const guard = createLoopGuard();
+      let stop = false;
+      for (let i = 0; i < uses.length; i++) {
+        const use = uses[i];
+        if (!concurrent) {
+          ui.toolCall(use, toolMap.get(use.name));
+          outcomes[i] = await runOne(use);
+        }
+        const outcome = outcomes[i];
+        const note = guard.note(use, outcome);
+        if (note) outcome.content = `${outcome.content}${note.text}`;
+        if (note?.stop) stop = true;
         ui.toolResult(use, outcome);
         results.push({
           type: 'tool_result',
@@ -186,6 +231,10 @@ export async function runAgentTurn({
       for (const text of followUps) ui.userMessage(text);
       if (followUps.length) results.push({ type: 'text', text: followUps.join('\n\n') });
       await session.append({ role: 'user', content: results });
+      if (stop) {
+        ui.warn('stopped: the same tool call kept returning the same result');
+        return { stopReason: 'loop' };
+      }
     }
     ui.warn(`stopped after ${limit} tool rounds (maxSteps); raise it with /max-steps <n>, or send a follow-up to continue`);
     return { stopReason: 'max_steps' };

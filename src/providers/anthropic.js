@@ -105,6 +105,8 @@ export function createAnthropicProvider(config) {
         messages,
       };
       if (config.effort) body.output_config = { effort: config.effort };
+      // Top-level cache_control caches the whole prefix up to the newest block, so each turn reuses the last.
+      if (config.promptCaching !== false) body.cache_control = { type: 'ephemeral' };
       if (THINKING[config.reasoning]) body.thinking = THINKING[config.reasoning];
       if (tools.length) {
         body.tools = tools.map(({ name, description, parameters }) => ({

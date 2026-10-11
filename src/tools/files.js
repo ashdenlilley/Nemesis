@@ -24,6 +24,8 @@ export const readFileTool = {
     required: ['path'],
   },
   describeCall: (input) => input.path,
+  target: (input) => input.path,
+  concurrent: true,
   async run({ path: p, offset = 1, limit = DEFAULT_LINE_LIMIT }, ctx) {
     const abs = resolveInWorkspace(ctx.roots ?? ctx.cwd, p);
     const lines = (await readText(abs)).split('\n');
@@ -50,6 +52,7 @@ export const writeFileTool = {
     required: ['path', 'content'],
   },
   describeCall: (input) => input.path,
+  target: (input) => input.path,
   async run({ path: p, content }, ctx) {
     const abs = resolveInWorkspace(ctx.roots ?? ctx.cwd, p);
     await mkdir(path.dirname(abs), { recursive: true });
@@ -77,6 +80,7 @@ export const editFileTool = {
     required: ['path', 'old_string', 'new_string'],
   },
   describeCall: (input) => input.path,
+  target: (input) => input.path,
   async run({ path: p, old_string: oldStr, new_string: newStr, replace_all: all = false }, ctx) {
     if (oldStr === newStr) throw new Error('old_string and new_string are identical');
     if (oldStr === '') throw new Error('old_string must not be empty');

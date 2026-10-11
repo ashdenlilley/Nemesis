@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { getFirstLine } from './text.js';
+import { networkCommand, scrubEnv } from '../sandbox.js';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -14,10 +15,10 @@ export function shellInvocation(command, platform = process.platform) {
   return { file: '/bin/sh', args: ['-c', command] };
 }
 
-export function runCommand(command, { cwd, timeoutMs = DEFAULT_TIMEOUT_MS, signal, platform } = {}) {
+export function runCommand(command, { cwd, timeoutMs = DEFAULT_TIMEOUT_MS, signal, platform, env } = {}) {
   const { file, args } = shellInvocation(command, platform);
   return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(file, args, { cwd, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const chunks = [];
     let size = 0;
     let truncated = false;
@@ -77,12 +78,19 @@ export const bashTool = {
     required: ['command'],
   },
   describeCall: (input) => getFirstLine(input.command, 120),
+  target: (input) => input.command,
   async run({ command, timeout_ms: timeoutMs = DEFAULT_TIMEOUT_MS }, ctx) {
     const timeout = Math.min(Math.max(1, timeoutMs), MAX_TIMEOUT_MS);
+    const strict = ctx.config?.sandbox === 'strict';
+    if (strict) {
+      const network = networkCommand(command);
+      if (network) throw new Error(`blocked by sandbox (strict): "${network}" may use the network. Run /sandbox off to allow it.`);
+    }
     const { code, timedOut, output } = await runCommand(command, {
       cwd: ctx.cwd,
       timeoutMs: timeout,
       signal: ctx.signal,
+      env: strict ? scrubEnv() : undefined,
     });
     const status = timedOut ? `timed out after ${timeout} ms` : `exit code ${code}`;
     return `${status}\n${output}`.trimEnd();

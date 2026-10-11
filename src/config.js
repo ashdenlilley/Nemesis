@@ -36,6 +36,11 @@ export const DEFAULTS = Object.freeze({
   idleTimeoutSec: 120, // a model request with no data for this long is dropped and retried
   effort: null,
   reasoning: null,
+  promptCaching: true, // Anthropic: cache the prompt prefix (cache reads cost about a tenth)
+  sandbox: 'off', // 'off' | 'strict', see src/sandbox.js
+  allowRules: [], // e.g. ["bash(npm test:*)", "web_fetch"]
+  denyRules: [], // e.g. ["bash(rm:*)"]
+  statusLine: null, // shell command; its first output line replaces the default status line
   autoCompact: true,
   compactThreshold: 0.8,
   outputStyle: 'default',

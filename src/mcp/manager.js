@@ -1,4 +1,6 @@
 import { McpClient } from './client.js';
+import { McpHttpClient } from './http.js';
+import { readAuthStore, tokenSource } from './oauth.js';
 
 // Tool names must match ^[a-zA-Z0-9_-]{1,64}$ for provider APIs.
 export function sanitizeName(s) {
@@ -31,8 +33,10 @@ function toolFromMcp(client, server, spec, risk) {
 }
 
 // Start every configured server. A failing server is reported and skipped, never fatal.
-// servers: { name: { command, args?, env?, cwd?, disabled?, risk? } }
-export async function startMcpServers(servers, { cwd, ui } = {}) {
+// servers: { name: { command, args?, env?, cwd?, disabled?, risk? } }   stdio
+//          { name: { url, headers?, oauth?, disabled?, risk? } }         remote (Streamable HTTP)
+// oauth: true uses the token stored by /mcp login, and is also used whenever a stored login exists.
+export async function startMcpServers(servers, { cwd, ui, home } = {}) {
   const clients = [];
   const tools = [];
   const status = [];
@@ -42,7 +46,14 @@ export async function startMcpServers(servers, { cwd, ui } = {}) {
       status.push({ name, state: 'disabled', tools: 0 });
       continue;
     }
-    const client = new McpClient({ name, command: spec.command, args: spec.args, env: spec.env, cwd: spec.cwd ?? cwd });
+    let client;
+    if (spec.url) {
+      const stored = home ? (await readAuthStore(home).catch(() => ({})))[name] : null;
+      const auth = spec.oauth || stored ? tokenSource({ name, home }) : null;
+      client = new McpHttpClient({ name, url: spec.url, headers: spec.headers, auth });
+    } else {
+      client = new McpClient({ name, command: spec.command, args: spec.args, env: spec.env, cwd: spec.cwd ?? cwd });
+    }
     try {
       await client.start();
       const specs = await client.listTools();

@@ -4,7 +4,9 @@ import { EFFORT_LEVELS, OUTPUT_STYLES, PROVIDERS, REASONING_MODES, saveUserConfi
 import { setEnvKeys } from '../env.js';
 import { compactSession, estimateTokens } from '../compact.js';
 import { buildSystemPrompt } from '../prompt.js';
-import { effectivePolicy } from '../permissions.js';
+import { effectivePolicy, parseRuleSpec } from '../permissions.js';
+import { login } from '../mcp/oauth.js';
+import { SANDBOX_MODES } from '../sandbox.js';
 import { Session } from '../session.js';
 import { runCommand } from '../tools/shell.js';
 import { VERSION } from '../version.js';
@@ -192,8 +194,16 @@ export function builtinCommands() {
     },
     {
       name: 'mcp',
-      description: 'Show MCP servers and their tools',
-      run(_args, state) {
+      description: 'Show MCP servers and their tools; /mcp login <name> signs in to a remote server',
+      async run(args, state) {
+        const [verb, name] = args.split(/\s+/);
+        if (verb === 'login') {
+          const spec = state.config.mcpServers?.[name];
+          if (!spec?.url) throw new Error(`usage: /mcp login <name> (a remote server with "url" in mcpServers)`);
+          await login({ name, serverUrl: spec.url, home: state.home, ui: state.ui, clientId: spec.oauth?.clientId ?? null });
+          state.ui.info(`signed in to ${name}; reconnecting`);
+          await state.reconnectMcp();
+        }
         if (state.mcp.status.length === 0) {
           state.ui.info('no MCP servers configured (add "mcpServers" to .nemesis/config.json)');
           return;
@@ -228,6 +238,32 @@ export function builtinCommands() {
           await saveUserConfig({ profiles: { [state.config.provider]: { model: args } } }, state.home);
         }
         state.ui.info(`model: ${state.config.provider}/${state.config.model}`);
+      },
+    },
+    {
+      name: 'sandbox',
+      description: `Show or set the sandbox: ${SANDBOX_MODES.join(' | ')}`,
+      async run(args, state) {
+        const mode = args.trim().toLowerCase();
+        if (mode) {
+          if (!SANDBOX_MODES.includes(mode)) throw new Error(`usage: /sandbox ${SANDBOX_MODES.join('|')}`);
+          state.config.sandbox = mode;
+          await saveUserConfig({ sandbox: mode }, state.home);
+        }
+        state.ui.info(state.config.sandbox === 'strict'
+          ? 'sandbox: strict. Shell commands get no API keys or tokens, and network-looking commands are refused (a guardrail, not isolation).'
+          : 'sandbox: off');
+      },
+    },
+    {
+      name: 'skills',
+      description: 'List skills from ~/.nemesis/skills and .nemesis/skills',
+      run(_args, state) {
+        if (!state.skills.size) {
+          state.ui.info('no skills. Add a folder with SKILL.md under .nemesis/skills/<name>/');
+          return;
+        }
+        state.ui.info([...state.skills.values()].map((s) => `${s.name.padEnd(18)} ${s.description}`).join('\n'));
       },
     },
     {
@@ -331,10 +367,12 @@ export function builtinCommands() {
       aliases: ['allowed-tools'],
       description: 'Show or set per-tool rules: /permissions allow|deny|ask <tool>|reset',
       run(args, state) {
-        const [verb, tool] = args.split(/\s+/);
+        // The rule may contain spaces: /permissions allow bash(npm test:*)
+        const [, verb = '', tool = ''] = /^(\S*)\s*(.*)$/.exec(args.trim());
         if (verb === 'reset') {
           for (const name of Object.keys(state.permissions.getRules())) state.permissions.setRule(name, 'ask');
         } else if (['allow', 'deny', 'ask'].includes(verb) && tool) {
+          parseRuleSpec(tool);
           state.permissions.setRule(tool, verb);
         } else if (verb) {
           throw new Error('usage: /permissions allow|deny|ask <tool> | /permissions reset');
