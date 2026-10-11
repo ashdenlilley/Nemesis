@@ -3,6 +3,7 @@
 // The box grows with its content up to MAX_INPUT_ROWS, then scrolls with the cursor.
 
 export const MAX_INPUT_ROWS = 8;
+export const MAX_SUGGESTIONS = 6;
 
 const PASTE_START = '\x1b[200~';
 const PASTE_END = '\x1b[201~';
@@ -180,10 +181,25 @@ function advance(start, s) {
 }
 const eofError = () => Object.assign(new Error('input closed'), { code: 'EOF' });
 
+// Suggestion rows under a prompt box. `items` are { name, description }; `index` is highlighted.
+// Shows a window of MAX_SUGGESTIONS rows that keeps the highlighted one visible.
+export function suggestionRows(items, index, width) {
+  const start = Math.max(0, Math.min(index - MAX_SUGGESTIONS + 1, items.length - MAX_SUGGESTIONS));
+  const shown = items.slice(Math.max(0, start), Math.max(0, start) + MAX_SUGGESTIONS);
+  const nameW = Math.min(24, Math.max(...shown.map((it) => it.name.length)) + 2);
+  return shown.map((it, k) => {
+    const i = Math.max(0, start) + k;
+    const text = `${i === index ? '❯' : ' '} ${it.name.padEnd(nameW)}${it.description ?? ''}`.slice(0, Math.max(10, width - 1));
+    return i === index ? `\x1b[1m${text}\x1b[0m` : dim(text);
+  });
+}
+
 // Terminal input and the live area at the bottom of the screen. The live area is one of:
 //   menu:   choose() options, arrow keys + Enter, or a number key. Esc or Ctrl+C cancels (-1).
 //   line:   question(), a prompt box that resolves with the entered text.
 //   watch:  watch(), a prompt box that stays up during a turn. Each Enter goes to onSubmit.
+// A status line (setStatus) sits above whichever is up. A box given complete(text) lists matches
+// under it: Up/Down pick, Tab fills in, Enter runs the highlighted one, Esc hides the list.
 // Output goes through wrap(): it clears the live area, writes the text, then redraws the area below it.
 // Raw mode stays on from the first prompt until close(). Turning it off on Windows starts a line-mode
 // console read that swallows keys until Enter, so typing between prompts would need an extra Enter.
@@ -199,10 +215,44 @@ export function createLineReader({ input = process.stdin, output = process.stdou
   let closed = false;
   let pending = ''; // keys pressed while no box was up
   let draft = null; // editor state of a watch box that closed with unsent text
+  let status = null; // line drawn above the live area while a turn runs
   const sigint = [];
   const cols = () => output.columns || 80;
 
   const surface = () => menu ?? line ?? watching;
+
+  // Matches for the box's current text, or [] when it has no completer or the list was dismissed.
+  function suggestions(s) {
+    if (!s?.complete || s.secret || s.st.dismissed === s.st.text) return [];
+    const items = s.complete(s.st.text) ?? [];
+    if (s.st.suggestFor !== s.st.text) {
+      s.st.suggestFor = s.st.text;
+      s.st.suggestIndex = 0;
+    }
+    if (s.st.suggestIndex >= items.length) s.st.suggestIndex = 0;
+    return items;
+  }
+
+  // Keys that act on an open suggestion list. Returns true when the key was used.
+  function suggestionKey(s, chunk) {
+    const items = suggestions(s);
+    if (!items.length) return false;
+    const st = s.st;
+    const n = items.length;
+    if (chunk === '\x1b[A' || chunk === '\x1bOA') st.suggestIndex = (st.suggestIndex + n - 1) % n;
+    else if (chunk === '\x1b[B' || chunk === '\x1bOB') st.suggestIndex = (st.suggestIndex + 1) % n;
+    else if (chunk === '\t') {
+      st.text = `${items[st.suggestIndex].name} `;
+      st.cur = st.text.length;
+    } else if (chunk === '\r') {
+      st.text = items[st.suggestIndex].name;
+      st.cur = st.text.length;
+      return false; // falls through to a normal submit
+    } else if (chunk === '\x1b') st.dismissed = st.text;
+    else return false;
+    paint();
+    return true;
+  }
 
   // Rows for a surface, the cursor's row and column inside them, and rows below the cursor.
   function render(s) {
@@ -226,7 +276,18 @@ export function createLineReader({ input = process.stdin, output = process.stdou
     if (end < rows.length) lines.push(dim(`… ${rows.length - end} more below`));
 
     const row = (start > 0 ? 1 : 0) + cursorRow - start;
+    const items = suggestions(s);
+    if (items.length) lines.push(...suggestionRows(items, st.suggestIndex, cols()));
     return { lines, row, col: prefixW + cursorCol, below: lines.length - 1 - row };
+  }
+
+  // The surface's rows with the status line above them.
+  function area() {
+    const s = surface();
+    if (!s) return status ? { lines: [status], row: 0, col: 0, below: 0 } : null;
+    const v = render(s);
+    if (!status) return v;
+    return { ...v, lines: [status, ...v.lines], row: v.row + 1 };
   }
 
   // Clear the live area, write `text` in its place, then draw the current surface below it.
@@ -250,9 +311,8 @@ export function createLineReader({ input = process.stdin, output = process.stdou
       tailCols = brk === -1 ? advance(tailCols, text) : advance(0, text.slice(brk + 1));
     }
 
-    const s = surface();
-    if (s) {
-      const v = render(s);
+    const v = area();
+    if (v) {
       // Mid-line text: step to a fresh line for the area.
       const partial = !atLineStart;
       if (partial) buf += '\r\n';
@@ -304,6 +364,7 @@ export function createLineReader({ input = process.stdin, output = process.stdou
   function finishLine(text, error) {
     const l = line;
     line = null;
+    l.complete = null;
     // Keep the box on screen after a submit only when asked (setup questions do this).
     const final = l.leave && !error ? `${render(l).lines.join('\r\n')}\r\n` : '';
     paint(final);
@@ -345,6 +406,7 @@ export function createLineReader({ input = process.stdin, output = process.stdou
       pending += chunk;
       return;
     }
+    if (suggestionKey(line ?? watching, chunk)) return;
     if (line) {
       const action = applyInput(line.st, chunk);
       if (action === 'submit') return finishLine(line.st.text);
@@ -352,6 +414,8 @@ export function createLineReader({ input = process.stdin, output = process.stdou
       return paint();
     }
     const w = watching;
+    // Esc interrupts the turn, like Ctrl+C on an empty box.
+    if (chunk === '\x1b') return w.onInterrupt();
     const action = applyInput(w.st, chunk);
     if (action === 'submit') {
       const text = w.st.text;
@@ -381,13 +445,14 @@ export function createLineReader({ input = process.stdin, output = process.stdou
     output,
     wrap,
 
-    // Resolves with the entered text. secret: characters are not drawn. leave: keep the box on screen.
-    question(label, { secret = false, leave = true } = {}) {
+    // Resolves with the entered text. secret: characters show as dots. leave: keep the box on screen.
+    // complete(text) -> [{ name, description }] lists matches under the box.
+    question(label, { secret = false, leave = true, complete = null } = {}) {
       if (!input.isTTY) return Promise.reject(new Error('line input needs a terminal'));
       if (closed) return Promise.reject(eofError());
       if (line || menu) return Promise.reject(new Error('input is already waiting for a line'));
       return new Promise((resolve, reject) => {
-        line = { label, secret, leave, resolve, reject, st: openEditor(secret) };
+        line = { label, secret, leave, complete, resolve, reject, st: openEditor(secret) };
         paint();
         updateMode();
         replayPending();
@@ -406,12 +471,19 @@ export function createLineReader({ input = process.stdin, output = process.stdou
     },
 
     // Keeps a prompt box up while a turn runs. Enter calls onSubmit(text); Ctrl+C on an empty box calls onInterrupt().
-    watch({ label, onSubmit, onInterrupt }) {
+    watch({ label, onSubmit, onInterrupt, complete = null }) {
       if (!input.isTTY) return;
-      watching = { label, st: openEditor(false), onSubmit, onInterrupt };
+      watching = { label, st: openEditor(false), onSubmit, onInterrupt, complete };
       paint();
       updateMode();
       replayPending();
+    },
+
+    // Line above the live area (a spinner, say). null removes it.
+    setStatus(text) {
+      if (text === status) return;
+      status = text;
+      if (input.isTTY && !closed) paint();
     },
 
     // Text typed but not sent stays as a draft for the next prompt box.

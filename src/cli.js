@@ -8,7 +8,7 @@ import { createBuiltinTools } from './tools/index.js';
 import { createPermissions, effectivePolicy } from './permissions.js';
 import { Session } from './session.js';
 import { buildSystemPrompt } from './prompt.js';
-import { runAgentTurn } from './agent.js';
+import { runAgentTurn, settleDanglingToolUses } from './agent.js';
 import { createUI } from './ui.js';
 import { createLineReader } from './input.js';
 import { createHooks } from './hooks.js';
@@ -181,14 +181,82 @@ async function createState({ args, cwd, home, rl, ui }) {
   return state;
 }
 
+const SPINNER = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
+const STALE_SECS = 20; // waiting this long on the model with no data shows a warning in the status line
+
+const formatSecs = (s) => (s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`);
+const formatTokens = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+
+// Animated status line above the prompt box while a turn runs: ✻ Nms-ing… (12s · esc to interrupt).
+// Turns yellow with a warning when the model has sent nothing for STALE_SECS.
+function startSpinner(rl, ui) {
+  const started = Date.now();
+  let lastActivity = started;
+  let phase = 'model';
+  let note = null;
+  let frame = 0;
+  const draw = () => {
+    const now = Date.now();
+    const secs = Math.floor((now - started) / 1000);
+    const idle = Math.floor((now - lastActivity) / 1000);
+    let warning = note;
+    if (!warning && phase === 'model' && idle >= STALE_SECS) warning = `no response from the model for ${formatSecs(idle)}`;
+    const icon = SPINNER[frame++ % SPINNER.length];
+    const head = warning ? ui.yellow(`${icon} Nms-ing…`) : ui.accent(`${icon} Nms-ing…`);
+    const tail = ui.dim(`(${formatSecs(secs)} · esc to interrupt)`);
+    rl.setStatus(`${head} ${tail}${warning ? ` ${ui.yellow(warning)}` : ''}`);
+  };
+  draw();
+  const timer = setInterval(draw, 150);
+  timer.unref?.();
+  return {
+    phase(p) {
+      phase = p;
+      lastActivity = Date.now();
+      note = null;
+    },
+    activity() {
+      lastActivity = Date.now();
+      note = null;
+    },
+    retry(message) {
+      note = message;
+      lastActivity = Date.now();
+    },
+    stop() {
+      clearInterval(timer);
+      rl.setStatus(null);
+      return Date.now() - started;
+    },
+  };
+}
+
+// Slash commands matching what is typed so far, for the prompt box's suggestion list.
+function commandCompleter(state) {
+  return (text) => {
+    if (!/^\/\S*$/.test(text)) return [];
+    const q = text.slice(1).toLowerCase();
+    const items = [
+      ...state.registry.builtins.map((c) => ({ name: `/${c.name}`, description: c.description, keys: [c.name, ...(c.aliases ?? [])] })),
+      ...[...(state.custom?.values() ?? [])].map((c) => ({ name: `/${c.name}`, description: `${c.description} (custom)`, keys: [c.name] })),
+    ];
+    return items
+      .filter((it) => it.keys.some((k) => k.startsWith(q)))
+      .sort((a, b) => Number(b.name === text) - Number(a.name === text) || a.name.localeCompare(b.name))
+      .map(({ name, description }) => ({ name, description }));
+  };
+}
+
 // One user turn: UserPromptSubmit hook, append, run the agent. Returns false on failure.
-async function runUserTurn(state, text) {
+async function runUserTurn(state, text, progress = null) {
   const submit = await state.hooks.fire('UserPromptSubmit', { prompt: text });
   if (submit.blocked) {
     state.ui.error(`prompt blocked by hook: ${submit.reason}`);
     return false;
   }
   const content = submit.context.length ? `${text}\n\n${submit.context.join('\n')}` : text;
+  // A session saved mid tool call (crash, kill) has tool_use blocks with no results; the API rejects it.
+  await settleDanglingToolUses(state.session);
   await state.session.append({ role: 'user', content });
 
   const controller = new AbortController();
@@ -211,21 +279,29 @@ async function runUserTurn(state, text) {
       hooks: state.hooks,
       usage: state.usage,
       takeFollowUps: () => state.followUps.splice(0),
+      progress,
     });
     return true;
   } catch (err) {
     if (err.name === 'AbortError') state.ui.warn('interrupted');
-    else state.ui.error(err.message);
+    else {
+      state.ui.error(err.message);
+      if (err.retryable) state.ui.info(state.ui.dim('  The model connection failed after retries. The session is intact; send your message again to retry.'));
+    }
     return false;
   } finally {
     state.controller = null;
-    state.ui.status(statusLine(state));
+    const elapsed = progress?.stop() ?? null;
+    state.ui.status(statusLine(state, elapsed));
   }
 }
 
-function statusLine(state) {
+function statusLine(state, elapsedMs = null) {
   const t = state.usage.totals();
-  return `${state.config.provider}/${state.config.model} · ${t.requests} requests · ${t.input + t.output} tokens`;
+  const usage = `${state.config.provider}/${state.config.model} · ${t.requests} requests · ${formatTokens(t.input + t.output)} tokens`;
+  if (elapsedMs === null) return usage;
+  const done = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return `✻ Nms'd for ${formatSecs(Math.round(elapsedMs / 1000))} · done ${done} · ${usage}`;
 }
 
 async function runOneShot(state, prompt) {
@@ -248,6 +324,7 @@ async function runOneShot(state, prompt) {
 async function runWatchedTurn(state, text) {
   state.rl.watch({
     label: state.ui.prompt(),
+    complete: commandCompleter(state),
     onSubmit: (typed) => {
       const queued = typed.trim();
       if (!queued) return;
@@ -257,7 +334,7 @@ async function runWatchedTurn(state, text) {
     onInterrupt: () => state.controller?.abort(),
   });
   try {
-    return await runUserTurn(state, text);
+    return await runUserTurn(state, text, startSpinner(state.rl, state.ui));
   } finally {
     state.rl.unwatch();
   }
@@ -289,7 +366,8 @@ async function runRepl(state) {
       let raw;
       try {
         ui.rule();
-        raw = await rl.question(ui.prompt(), { leave: false }); // the box clears on Enter; the feed shows the prompt
+        // The box clears on Enter; the feed shows the prompt.
+        raw = await rl.question(ui.prompt(), { leave: false, complete: commandCompleter(state) });
       } catch {
         break; // input closed
       }

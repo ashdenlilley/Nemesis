@@ -1,4 +1,4 @@
-import { openStream, postJson } from './http.js';
+import { openStream, postJson, ProviderError } from './http.js';
 import { readSSE } from './sse.js';
 
 const STOP_REASONS = { stop: 'end_turn', tool_calls: 'tool_use', length: 'max_tokens' };
@@ -62,13 +62,18 @@ export function fromOpenAIResponse(data) {
 }
 
 // Fold chat-completion SSE chunks, including tool-call argument fragments, into one response.
-export async function readOpenAIStream(response, onText) {
+// A stream that closes with neither a finish_reason nor [DONE] was cut off: a retryable failure.
+export async function readOpenAIStream(response, onText, sseOpts = {}) {
   let text = '';
   const calls = [];
   let finish = null;
   let usage;
-  for await (const { data } of readSSE(response)) {
-    if (data === '[DONE]') break;
+  let done = false;
+  for await (const { data } of readSSE(response, sseOpts)) {
+    if (data === '[DONE]') {
+      done = true;
+      break;
+    }
     const chunk = JSON.parse(data);
     if (chunk.usage) usage = chunk.usage;
     const choice = chunk.choices?.[0];
@@ -86,6 +91,7 @@ export async function readOpenAIStream(response, onText) {
     }
     if (choice.finish_reason) finish = choice.finish_reason;
   }
+  if (!finish && !done) throw new ProviderError('connection closed before the response finished', undefined, { retryable: true });
   const message = {
     content: text || null,
     tool_calls: calls.filter(Boolean).map((c) => ({ id: c.id, function: { name: c.name, arguments: c.args } })),
@@ -98,7 +104,7 @@ export function createOpenAIProvider(config) {
 
   return {
     name: 'openai',
-    async createMessage({ system, messages, tools, signal, onText, model, maxTokens }) {
+    async createMessage({ system, messages, tools, signal, onText, model, maxTokens, onActivity, onRetry }) {
       if (!config.apiKey) throw new Error('not logged in: run /login or set OPENAI_API_KEY');
       const body = {
         model: model ?? config.model,
@@ -113,12 +119,15 @@ export function createOpenAIProvider(config) {
       }
       const headers = { authorization: `Bearer ${config.apiKey}` };
       const url = `${baseUrl}/chat/completions`;
+      const idleMs = (config.idleTimeoutSec ?? 120) * 1000;
 
       if (config.stream === false) {
-        return fromOpenAIResponse(await postJson(url, body, headers, { signal }));
+        // Without streaming no bytes arrive until the whole reply is ready, so allow longer.
+        return fromOpenAIResponse(await postJson(url, body, headers, { signal, onRetry, idleMs: idleMs * 5 }));
       }
-      const res = await openStream(url, body, headers, { signal });
-      return readOpenAIStream(res, onText);
+      const res = await openStream(url, body, headers, { signal, onRetry, idleMs });
+      onActivity?.();
+      return readOpenAIStream(res, onText, { idleMs, onActivity, signal });
     },
   };
 }

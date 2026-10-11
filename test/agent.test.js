@@ -184,3 +184,66 @@ test('max steps stops a runaway loop', async () => {
   assert.equal(result.stopReason, 'max_steps');
   assert.equal(provider.calls.length, 3);
 });
+
+
+test('tool calls run even when the stop reason is not tool_use (OpenAI-compatible finish_reason "stop")', async () => {
+  const session = await newSession();
+  await session.append({ role: 'user', content: 'go' });
+  const provider = scriptedProvider([
+    { stopReason: 'end_turn', content: [{ type: 'tool_use', id: 't1', name: 'echo', input: { text: 'x' } }] },
+    { stopReason: 'end_turn', content: [{ type: 'text', text: 'done' }] },
+  ]);
+  const permissions = createPermissions({ policy: { read: 'allow', write: 'deny', exec: 'deny' } });
+  await runAgentTurn({
+    provider, config: {}, tools: [echoTool], system: 'sys', session, permissions,
+    ui: silentUI(), ctx: { cwd: process.cwd() }, maxSteps: 5,
+  });
+  assert.equal(provider.calls.length, 2);
+  assert.equal(provider.calls[1].messages.at(-1).content[0].tool_use_id, 't1');
+});
+
+test('a tool call cut off at max_tokens gets an error result instead of leaving the session broken', async () => {
+  const session = await newSession();
+  await session.append({ role: 'user', content: 'write a big file' });
+  const provider = scriptedProvider([
+    { stopReason: 'max_tokens', content: [{ type: 'tool_use', id: 't1', name: 'echo', input: { _raw: '{"text":"unfinis' } }] },
+    { stopReason: 'end_turn', content: [{ type: 'text', text: 'ok, smaller' }] },
+  ]);
+  const permissions = createPermissions({ policy: { read: 'allow', write: 'deny', exec: 'deny' } });
+  const warnings = [];
+  await runAgentTurn({
+    provider, config: { maxTokens: 10 }, tools: [echoTool], system: 'sys', session, permissions,
+    ui: { ...silentUI(), warn: (w) => warnings.push(w) }, ctx: { cwd: process.cwd() }, maxSteps: 5,
+  });
+  const result = provider.calls[1].messages.at(-1).content[0];
+  assert.equal(result.tool_use_id, 't1');
+  assert.equal(result.is_error, true);
+  assert.match(result.content, /max_tokens/);
+  assert.match(warnings[0], /maxTokens/);
+});
+
+test('a reply dropped mid-stream is requested again; the session gets only the complete reply', async () => {
+  const session = await newSession();
+  await session.append({ role: 'user', content: 'hi' });
+  let calls = 0;
+  const provider = {
+    async createMessage({ onText }) {
+      calls++;
+      if (calls === 1) {
+        onText('Hel');
+        throw Object.assign(new Error('connection lost mid-response: ECONNRESET'), { retryable: true });
+      }
+      onText('Hello');
+      return { stopReason: 'end_turn', content: [{ type: 'text', text: 'Hello' }] };
+    },
+  };
+  const warnings = [];
+  const permissions = createPermissions({ policy: { read: 'allow', write: 'deny', exec: 'deny' } });
+  await runAgentTurn({
+    provider, config: {}, tools: [], system: 'sys', session, permissions,
+    ui: { ...silentUI(), streamText() {}, endStream() {}, warn: (w) => warnings.push(w) }, ctx: { cwd: process.cwd() }, maxSteps: 3,
+  });
+  assert.equal(calls, 2);
+  assert.match(warnings[0], /ECONNRESET.*again/);
+  assert.deepEqual(session.messages.at(-1).content, [{ type: 'text', text: 'Hello' }]);
+});

@@ -54,7 +54,11 @@ export const writeFileTool = {
     const abs = resolveInWorkspace(ctx.roots ?? ctx.cwd, p);
     await mkdir(path.dirname(abs), { recursive: true });
     await writeFile(abs, content, 'utf8');
-    return `wrote ${Buffer.byteLength(content)} bytes to ${p}`;
+    const lines = content.replace(/\n$/, '').split('\n');
+    return {
+      content: `wrote ${Buffer.byteLength(content)} bytes to ${p}`,
+      display: { type: 'write', path: p, lineCount: content ? lines.length : 0, preview: content ? lines.slice(0, 5) : [] },
+    };
   },
 };
 
@@ -84,11 +88,23 @@ export const editFileTool = {
       throw new Error(`old_string matches ${count} times; add surrounding context or set replace_all`);
     }
     // Slice-based replacement avoids String.replace's $-pattern expansion on user text.
+    const at = text.indexOf(oldStr);
     const next = all
       ? text.split(oldStr).join(newStr)
-      : text.slice(0, text.indexOf(oldStr)) + newStr + text.slice(text.indexOf(oldStr) + oldStr.length);
+      : text.slice(0, at) + newStr + text.slice(at + oldStr.length);
     await writeFile(abs, next, 'utf8');
-    return `edited ${p} (${all ? count : 1} replacement${count === 1 && !all ? '' : 's'})`;
+    const replacements = all ? count : 1;
+    return {
+      content: `edited ${p} (${replacements} replacement${replacements === 1 ? '' : 's'})`,
+      display: {
+        type: 'diff',
+        path: p,
+        line: text.slice(0, at).split('\n').length,
+        oldLines: oldStr.split('\n'),
+        newLines: newStr.split('\n'),
+        replacements,
+      },
+    };
   },
 };
 

@@ -189,3 +189,65 @@ test('a secret question shows dots, never the characters', async () => {
   assert.match(term.text(), /•••/);
   assert.doesNotMatch(term.text(), /abc/);
 });
+
+
+test('slash suggestions: typing / lists matches, Down moves, Tab fills in, Enter runs the highlighted one', async () => {
+  const term = fakeTerminal();
+  const reader = createLineReader({ input: term.input, output: term.output });
+  const commands = [{ name: '/help', description: 'Show all commands' }, { name: '/hooks', description: 'List hooks' }, { name: '/model', description: 'Model' }];
+  const complete = (text) => (/^\/\S*$/.test(text) ? commands.filter((c) => c.name.startsWith(text)) : []);
+  const answer = reader.question('> ', { leave: false, complete });
+  const tick = () => new Promise((r) => setImmediate(r));
+  term.input.write('/');
+  await tick();
+  term.input.write('h');
+  await tick();
+  assert.match(term.text(), /\/help {2,}Show all commands/);
+  assert.match(term.text(), /\/hooks/);
+  term.input.write('\x1b[B');
+  await tick();
+  term.input.write('\r');
+  assert.equal(await answer, '/hooks');
+
+  const second = reader.question('> ', { leave: false, complete });
+  term.input.write('/');
+  await tick();
+  term.input.write('m');
+  await tick();
+  term.input.write('\t');
+  await tick();
+  term.input.write('x');
+  await tick();
+  term.input.write('\r');
+  assert.equal(await second, '/model x');
+});
+
+test('Esc hides the suggestion list so Enter submits what was typed', async () => {
+  const term = fakeTerminal();
+  const reader = createLineReader({ input: term.input, output: term.output });
+  const complete = (text) => (text.startsWith('/') ? [{ name: '/help', description: '' }] : []);
+  const answer = reader.question('> ', { leave: false, complete });
+  const tick = () => new Promise((r) => setImmediate(r));
+  term.input.write('/');
+  await tick();
+  term.input.write('x');
+  await tick();
+  term.input.write('\x1b');
+  await tick();
+  term.input.write('\r');
+  assert.equal(await answer, '/x');
+});
+
+test('status line sits above the watch box, and Esc interrupts the turn', async () => {
+  const term = fakeTerminal();
+  const reader = createLineReader({ input: term.input, output: term.output });
+  let interrupted = false;
+  reader.watch({ label: '> ', onSubmit() {}, onInterrupt: () => { interrupted = true; } });
+  reader.setStatus('* Nms-ing...');
+  assert.match(term.text(), /\* Nms-ing\.\.\.\r\n> /);
+  term.input.write('\x1b');
+  await new Promise((r) => setImmediate(r));
+  assert.equal(interrupted, true);
+  reader.setStatus(null);
+  reader.unwatch();
+});

@@ -34,3 +34,12 @@ export function accentOpen(depth = 'truecolor', hex = ACCENT_HEX) {
 }
 
 export const RESET = '\x1b[0m';
+
+// Background color. `basic` is the fallback escape for 16-color terminals ('' for none).
+export function bgOpen(depth, hex, basic = '') {
+  if (depth === 'none') return '';
+  if (depth === 'basic') return basic;
+  const rgb = hexToRgb(hex);
+  if (depth === '256') return `\x1b[48;5;${rgbTo256(rgb)}m`;
+  return `\x1b[48;2;${rgb.join(';')}m`;
+}

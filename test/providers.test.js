@@ -109,3 +109,57 @@ test('OpenAI stream: content and tool-call argument fragments are joined', async
     { type: 'tool_use', id: 'c1', name: 'grep', input: { pattern: 'x' } },
   ]);
 });
+
+
+test('Anthropic stream that closes before message_stop is a retryable failure, not a silent partial reply', async () => {
+  const body = sseBody([
+    anthropicEvent({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+    anthropicEvent({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hal' } }),
+  ]);
+  await assert.rejects(readAnthropicStream(body), (err) => err.retryable === true && /closed before/.test(err.message));
+});
+
+test('Anthropic overloaded error event is retryable', async () => {
+  const body = sseBody([anthropicEvent({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } })]);
+  await assert.rejects(readAnthropicStream(body), (err) => err.retryable === true);
+});
+
+test('OpenAI stream with no finish_reason and no [DONE] is a retryable failure', async () => {
+  const body = sseBody([openaiChunk({ choices: [{ delta: { content: 'Hi' } }] })]);
+  await assert.rejects(readOpenAIStream(body), (err) => err.retryable === true);
+});
+
+test('a stream that goes silent is cut off after idleMs with a stall error', async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(anthropicEvent({ type: 'message_start', message: {} })));
+      // then nothing: the connection hangs
+    },
+  });
+  const started = Date.now();
+  await assert.rejects(
+    readAnthropicStream(new Response(stream), null, { idleMs: 50 }),
+    (err) => err.retryable === true && /stalled/.test(err.message),
+  );
+  assert.ok(Date.now() - started < 2000);
+});
+
+test('network errors before a response are retried, then succeed', async () => {
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    if (calls === 1) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } });
+    return new Response(JSON.stringify({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }), { status: 200 });
+  };
+  try {
+    const retries = [];
+    const provider = createProvider({ provider: 'anthropic', apiKey: 'k', model: 'm', maxTokens: 10, stream: false });
+    const res = await provider.createMessage({ system: 's', messages: [], tools: [], onRetry: (r) => retries.push(r) });
+    assert.equal(calls, 2);
+    assert.equal(res.content[0].text, 'ok');
+    assert.match(retries[0].error.message, /ECONNRESET/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

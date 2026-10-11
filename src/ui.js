@@ -1,9 +1,23 @@
 import { getFirstLine } from './tools/text.js';
-import { accentOpen, colorDepth, RESET } from './theme.js';
+import { accentOpen, bgOpen, colorDepth, RESET } from './theme.js';
 import { logoLines } from './logo.js';
+import { createFlow, createMarkdownStream } from './markdown.js';
 
-const CODES = { dim: '\x1b[2m', red: '\x1b[31m', yellow: '\x1b[33m', bold: '\x1b[1m' };
+const CODES = { dim: '\x1b[2m', red: '\x1b[31m', green: '\x1b[32m', yellow: '\x1b[33m', bold: '\x1b[1m' };
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
+
+// Short names for built-in tools in the feed, Claude Code style: ● Read(src/cli.js)
+const TOOL_LABELS = {
+  read_file: 'Read',
+  write_file: 'Write',
+  edit_file: 'Update',
+  bash: 'Bash',
+  glob: 'Glob',
+  grep: 'Search',
+  todo_write: 'Todos',
+  task: 'Task',
+};
+const DIFF_LINES = 8; // per side, before "… N more lines"
 
 // depth: 'truecolor' | '256' | 'basic' | 'none'. color: true/false overrides detection (tests).
 export function createUI({ out = process.stdout, err = process.stderr, color, depth } = {}) {
@@ -12,18 +26,44 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
   const paintWith = (open, text) => (level === 'none' || !open ? text : `${open}${text}${RESET}`);
   const paint = (style, text) => paintWith(CODES[style] ?? '', text);
   const accentText = (text) => paintWith(accent + CODES.bold, text);
+  const on = level !== 'none';
+  const tones = {
+    code: accentOpen(level, '#C9A2FF'),
+    userBg: bgOpen(level, '#2E2E33'),
+    removed: bgOpen(level, '#4B1D1D', '\x1b[41m'),
+    added: bgOpen(level, '#1D3F1D', '\x1b[42m'),
+  };
+  const mdStyles = on
+    ? { code: tones.code, bold: CODES.bold, heading: accent + CODES.bold, reset: RESET }
+    : {};
 
   // Layout state. Blocks are user prompts, assistant text, tool activity, and meta lines.
   // A blank line separates consecutive blocks of different kinds; none goes inside a block.
   let last = null; // kind of the block last written, or null after a rule
   let held = ''; // newlines from assistant text, written only if more text follows in the same block
   let midLine = false; // stdout text is missing its final newline
+  let md = null; // Markdown renderer for the text block in progress
+  let flow = null; // word wrap for it
+
+  const cols = () => out.columns || err.columns || 80;
+  const width = () => Math.min(cols(), 100);
+
+  const writeOut = (s) => {
+    if (!s) return;
+    out.write(s);
+    midLine = !s.endsWith('\n');
+  };
+
+  // Write what the renderer still holds and end the line.
+  const finishText = () => {
+    if (md) writeOut(flow.write(md.flush()) + flow.end());
+    md = null;
+    flow = null;
+    if (midLine) writeOut('\n');
+  };
 
   const startBlock = (kind, stream) => {
-    if (midLine) {
-      out.write('\n');
-      midLine = false;
-    }
+    finishText();
     if (last !== null && last !== kind) stream.write('\n');
     if (last !== kind) held = '';
     last = kind;
@@ -34,14 +74,19 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
     const trailing = /\n*$/.exec(chunk)[0];
     let core = chunk.slice(0, chunk.length - trailing.length);
     if (core) {
-      // A new block starts on a fresh line; a continuing one picks up mid-line where the last chunk ended.
       if (last !== 'text') {
         core = core.replace(/^\n+/, '');
         startBlock('text', out);
+        writeOut('● ');
+        md = createMarkdownStream(mdStyles);
+        flow = createFlow({ width: cols, indent: '  ' });
+        flow.start(2);
+      } else if (!md) {
+        md = createMarkdownStream(mdStyles);
+        flow = createFlow({ width: cols, indent: '  ' });
       }
-      out.write(held + core);
-      held = '';
-      midLine = true;
+      writeOut(flow.write(md.push(held + core)));
+      held = trailing;
     } else if (last === 'text') {
       held += trailing;
     }
@@ -51,26 +96,51 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
     if (tool?.describeCall) return getFirstLine(tool.describeCall(input), 100);
     return getFirstLine(JSON.stringify(input ?? {}), 100);
   };
+  const callLine = (use, tool) => `${accentText('●')} ${paint('bold', TOOL_LABELS[use.name] ?? use.name)}(${summarize(tool, use.input)})`;
 
-  const width = () => Math.min(out.columns || err.columns || 80, 100);
+  // A full-width row on a background color.
+  const band = (bg, text) => {
+    if (!bg) return text;
+    const pad = Math.max(0, width() - stripAnsi(text).length);
+    return `${bg}${text}${' '.repeat(pad)}${RESET}`;
+  };
+
+  // edit_file / write_file results: a header and the changed lines with line numbers.
+  const renderDisplay = (d) => {
+    const rows = [];
+    if (d.type === 'diff') {
+      const reps = d.replacements > 1 ? `, ${d.replacements} replacements` : '';
+      rows.push(`  ⎿  Updated ${paint('bold', d.path)} ${paint('dim', `(+${d.newLines.length} -${d.oldLines.length}${reps})`)}`);
+      const numW = String(d.line + Math.max(d.oldLines.length, d.newLines.length)).length;
+      const side = (lines, sign, bg) => {
+        lines.slice(0, DIFF_LINES).forEach((l, i) => {
+          const text = `      ${String(d.line + i).padStart(numW)} ${sign}${l.replace(/\t/g, '  ')}`;
+          rows.push(on ? band(bg, text.slice(0, width())) : text);
+        });
+        if (lines.length > DIFF_LINES) rows.push(paint('dim', `      … ${lines.length - DIFF_LINES} more lines`));
+      };
+      side(d.oldLines, '-', tones.removed);
+      side(d.newLines, '+', tones.added);
+    } else if (d.type === 'write') {
+      rows.push(`  ⎿  Wrote ${d.lineCount} line${d.lineCount === 1 ? '' : 's'} to ${paint('bold', d.path)}`);
+      const numW = String(Math.min(d.preview.length, d.lineCount)).length;
+      d.preview.forEach((l, i) => rows.push(paint('dim', `      ${String(i + 1).padStart(numW)} ${l.replace(/\t/g, '  ')}`.slice(0, width()))));
+      if (d.lineCount > d.preview.length) rows.push(paint('dim', `      … ${d.lineCount - d.preview.length} more lines`));
+    }
+    return rows;
+  };
 
   return {
     streamText(delta) {
       writeText(delta);
     },
     endStream() {
-      if (midLine) {
-        out.write('\n');
-        midLine = false;
-      }
+      finishText();
       held = '';
     },
     assistant(text) {
       writeText(text.trim());
-      if (midLine) {
-        out.write('\n');
-        midLine = false;
-      }
+      finishText();
       // A following text block in the same response starts after one blank line.
       held = '\n';
     },
@@ -83,15 +153,15 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
         { text: cwd, style: 'dim' },
         { text: `session ${session}`, style: 'dim' },
       ];
-      const cols = width() >= 90 ? 52 : 34;
-      const logo = logoLines(cols);
+      const logoCols = width() >= 90 ? 52 : 34;
+      const logo = logoLines(logoCols);
       if (!logo) {
         err.write(`${accentText(`✻ Nemesis ${version}`)}\n`);
         for (const line of info.slice(1)) err.write(`  ${paint(line.style === 'dim' ? 'dim' : 'plain', line.text)}\n`);
         return;
       }
       const top = Math.max(0, Math.floor((logo.length - info.length) / 2));
-      const room = width() - cols - 4;
+      const room = width() - logoCols - 4;
       for (let r = 0; r < logo.length; r++) {
         const item = info[r - top];
         let right = '';
@@ -99,28 +169,29 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
           const text = item.text.length > room ? `${item.text.slice(0, room - 1)}…` : item.text;
           right = item.style === 'title' ? accentText(text) : item.style === 'dim' ? paint('dim', text) : text;
         }
-        err.write(`${paintWith(accent, logo[r].padEnd(cols))}   ${right}\n`);
+        err.write(`${paintWith(accent, logo[r].padEnd(logoCols))}   ${right}\n`);
       }
     },
 
     // Dim rule above the prompt. Starts a new block, so the next block follows it without a gap.
     rule() {
+      finishText();
       last = null;
       held = '';
       err.write(`${paint('dim', '─'.repeat(width()))}\n`);
     },
 
-    // readline prompt string (readline ignores ANSI when measuring width).
+    // Prompt box label.
     prompt() {
       return `${paintWith(accent, '❯')} `;
     },
 
-    // A submitted prompt, echoed into the feed. Follow-ups sent mid-turn are echoed when they reach the model.
+    // A submitted prompt, echoed into the feed on a shaded band. Follow-ups are echoed when they reach the model.
     userMessage(text) {
       startBlock('user', err);
       const [first, ...rest] = text.split('\n');
       const lines = [`${paintWith(accent, '❯')} ${first}`, ...rest.map((l) => `  ${l}`)];
-      err.write(`${lines.join('\n')}\n`);
+      err.write(`${lines.map((l) => band(tones.userBg, l)).join('\n')}\n`);
     },
 
     // A follow-up waiting for the next tool call.
@@ -129,23 +200,31 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
       err.write(`${paint('dim', `  queued: ${getFirstLine(text, 100)}`)}\n`);
     },
 
-    // One line under the answer: model, requests, tokens.
+    // One line under the answer, e.g. ✻ Nms'd for 12s · done 6:23 PM · model · tokens.
     status(text) {
       startBlock('meta', err);
-      err.write(`${paint('dim', `  ${text}`)}\n`);
+      err.write(`${paint('dim', text)}\n`);
     },
 
     toolCall(use, tool) {
+      const again = last === 'tool';
       startBlock('tool', err);
-      err.write(`${accentText('>_')} ${use.name}${paint('dim', `(${summarize(tool, use.input)})`)}\n`);
+      err.write(`${again ? '\n' : ''}${callLine(use, tool)}\n`);
     },
     toolResult(use, outcome) {
       startBlock('tool', err);
+      if (!outcome.isError && outcome.display) {
+        const rows = renderDisplay(outcome.display);
+        if (rows.length) {
+          err.write(`${rows.join('\n')}\n`);
+          return;
+        }
+      }
       const text = String(outcome.content ?? '').trim();
       const more = text.split('\n').length - 1;
       const preview = getFirstLine(text, 120);
       const tail = more > 0 ? ` … +${more} lines` : '';
-      err.write(paint(outcome.isError ? 'red' : 'dim', `  ⎿  ${preview}${tail}\n`));
+      err.write(paint(outcome.isError ? 'red' : 'dim', `  ⎿  ${preview}${tail}`) + '\n');
     },
     info(text) {
       startBlock('meta', err);
@@ -153,11 +232,11 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
     },
     warn(text) {
       startBlock('meta', err);
-      err.write(paint('yellow', `warning: ${text}\n`));
+      err.write(paint('yellow', `warning: ${text}`) + '\n');
     },
     error(text) {
       startBlock('meta', err);
-      err.write(paint('red', `error: ${text}\n`));
+      err.write(paint('red', `error: ${text}`) + '\n');
     },
     bold(text) {
       return paint('bold', text);
@@ -167,6 +246,9 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
     },
     accent(text) {
       return accentText(text);
+    },
+    yellow(text) {
+      return paint('yellow', text);
     },
     // Quiet view for sub-agents: tool activity only, prefixed with the agent name.
     child(label) {
@@ -179,7 +261,7 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
         bold: (t) => t,
         toolCall(use, tool) {
           startBlock('tool', err);
-          err.write(`${tag} ${accentText('>_')} ${use.name}${paint('dim', `(${summarize(tool, use.input)})`)}\n`);
+          err.write(`${tag} ${callLine(use, tool)}\n`);
         },
         toolResult(use, outcome) {
           if (outcome.isError) {

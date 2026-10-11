@@ -3,6 +3,8 @@ import { truncateMiddle } from './tools/text.js';
 import { maybeCompact } from './compact.js';
 
 export const MAX_RESULT_CHARS = 50_000;
+export const STREAM_RETRIES = 2; // a reply cut off mid-stream is requested again this many times
+const TRUNCATED_TOOL = 'Your output hit the max_tokens limit before this tool call was complete, so it was not run. Call it again with smaller input, for example by writing a large file in several edits.';
 
 export async function executeToolUse(use, { toolMap, permissions, ctx, hooks = null }) {
   const tool = toolMap.get(use.name);
@@ -22,7 +24,10 @@ export async function executeToolUse(use, { toolMap, permissions, ctx, hooks = n
   let outcome;
   try {
     const output = await tool.run(use.input, ctx);
-    outcome = { content: truncateMiddle(String(output), MAX_RESULT_CHARS), isError: false };
+    // A tool may return { content, display }: content goes to the model, display only to the UI.
+    const rich = output !== null && typeof output === 'object' && 'content' in output;
+    outcome = { content: truncateMiddle(String(rich ? output.content : output), MAX_RESULT_CHARS), isError: false };
+    if (rich && output.display) outcome.display = output.display;
   } catch (err) {
     if (err.name === 'AbortError') throw err;
     outcome = { content: `Error: ${err.message}`, isError: true };
@@ -63,12 +68,42 @@ function normalizeContent(blocks) {
   return kept.length ? kept : [{ type: 'text', text: '(no response)' }];
 }
 
+// One model call. A retryable failure after the stream opened (dropped connection, stall, early close)
+// requests the reply again; HTTP-level retries already happen inside the provider.
+async function requestReply({ provider, request, ui, progress, signal }) {
+  for (let attempt = 0; ; attempt++) {
+    let streamed = false;
+    progress?.phase('model');
+    try {
+      const response = await provider.createMessage({
+        ...request,
+        signal,
+        onActivity: () => progress?.activity(),
+        onRetry: ({ attempt: n, retries, delayMs, error }) => {
+          progress?.retry?.(`${error.message}; retry ${n}/${retries} in ${Math.round(delayMs / 1000)}s`);
+        },
+        onText: (delta) => {
+          streamed = true;
+          progress?.activity();
+          ui.streamText(delta);
+        },
+      });
+      return { response, streamed };
+    } catch (err) {
+      if (streamed) ui.endStream();
+      if (!err.retryable || attempt >= STREAM_RETRIES || signal?.aborted) throw err;
+      ui.warn(`${err.message}; requesting the reply again (${attempt + 1}/${STREAM_RETRIES})`);
+    }
+  }
+}
+
 // One user turn: call the model, run requested tools, repeat until the model stops.
-//   runtime: { provider, config, tools, system, session, permissions, ui, ctx, hooks?, usage?, model?, maxSteps?, takeFollowUps? }
+//   runtime: { provider, config, tools, system, session, permissions, ui, ctx, hooks?, usage?, model?, maxSteps?, takeFollowUps?, progress? }
 // takeFollowUps() returns the prompts the user queued during the turn. They join the tool results after each tool round.
+// progress: { phase('model' | 'tool'), activity(), retry(message) } drives the status line; all optional.
 export async function runAgentTurn({
   provider, config, tools, system, session, permissions, ui, ctx,
-  hooks = null, usage = null, model = null, maxSteps, takeFollowUps = null,
+  hooks = null, usage = null, model = null, maxSteps, takeFollowUps = null, progress = null,
 }) {
   const toolMap = new Map(tools.map((t) => [t.name, t]));
   const apiTools = tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
@@ -80,17 +115,12 @@ export async function runAgentTurn({
         await maybeCompact({ session, provider, config, system, ui, signal: ctx.signal });
       }
 
-      let streamed = false;
-      const response = await provider.createMessage({
-        system,
-        messages: session.messages,
-        tools: apiTools,
+      const { response, streamed } = await requestReply({
+        provider,
+        request: { system, messages: session.messages, tools: apiTools, model },
+        ui,
+        progress,
         signal: ctx.signal,
-        model,
-        onText: (delta) => {
-          streamed = true;
-          ui.streamText(delta);
-        },
       });
       usage?.add(response.usage);
 
@@ -104,7 +134,20 @@ export async function runAgentTurn({
       }
 
       const uses = content.filter((b) => b.type === 'tool_use');
-      if (response.stopReason !== 'tool_use' || uses.length === 0) {
+      // Cut off at max_tokens mid tool call: the input is incomplete. Every tool_use still needs a
+      // tool_result, or each later request in this session is rejected.
+      if (response.stopReason === 'max_tokens' && uses.length) {
+        ui.warn(`reply hit maxTokens (${config.maxTokens}) during a tool call; asking the model to retry smaller`);
+        await session.append({
+          role: 'user',
+          content: uses.map((use) => ({ type: 'tool_result', tool_use_id: use.id, content: TRUNCATED_TOOL, is_error: true })),
+        });
+        continue;
+      }
+      // Tool calls run even when the stop reason says otherwise: some OpenAI-compatible servers send
+      // finish_reason "stop" with tool_calls, and leaving them unanswered breaks the session.
+      if (uses.length === 0) {
+        if (response.stopReason === 'max_tokens') ui.warn(`reply cut off at maxTokens (${config.maxTokens}); raise maxTokens in config or ask it to continue`);
         if (hooks) {
           const stop = await hooks.fire('Stop', { stop_reason: response.stopReason });
           if (stop.blocked) {
@@ -117,6 +160,7 @@ export async function runAgentTurn({
       }
 
       const results = [];
+      progress?.phase('tool');
       for (const use of uses) {
         ui.toolCall(use, toolMap.get(use.name));
         const outcome = await executeToolUse(use, { toolMap, permissions, ctx, hooks });

@@ -40,7 +40,8 @@ test('UI with color off emits no escape codes', () => {
   ui.toolResult({ name: 'bash' }, { content: 'ok', isError: false });
   ui.banner({ version: '0.2.0', provider: 'anthropic', model: 'm', cwd: '/w', session: 's1' });
   assert.equal(err.text.includes('\x1b['), false);
-  assert.match(err.text, />_ bash\(\{"command":"ls"\}\)/);
+  assert.match(err.text, /● Bash\(\{"command":"ls"\}\)/);
+  assert.match(err.text, / {2}⎿ {2}ok/);
   assert.match(err.text, /Nemesis 0\.2\.0/);
 });
 
@@ -69,5 +70,54 @@ test('streamed text chunks join on one line instead of each starting a new line'
   const ui = createUI({ out, err: out, color: false });
   for (const c of ['Hello! I', "'m Nemesis", ', ready', '\n\nNext paragraph']) ui.streamText(c);
   ui.endStream();
-  assert.equal(out.text, "Hello! I'm Nemesis, ready\n\nNext paragraph\n");
+  assert.equal(out.text, "● Hello! I'm Nemesis, ready\n\n  Next paragraph\n");
+});
+
+test('streamed Markdown: inline code, bold, headings, bullets, and fenced code are styled, markers removed', () => {
+  const out = buffer();
+  const ui = createUI({ out, err: out, depth: 'truecolor' });
+  const text = '# Title\nUse `npm test` and **care**.\n- one\n```js\nconst a = 1;\n```\ndone';
+  for (const ch of text) ui.streamText(ch); // worst case: one character per chunk
+  ui.endStream();
+  const plain = stripAnsi(out.text);
+  assert.equal(plain, '● Title\n  Use npm test and care.\n  • one\n  const a = 1;\n  done\n');
+  assert.ok(out.text.includes('\x1b[1m'), 'bold is applied');
+  assert.ok(out.text.includes('\x1b[38;2;'), 'code is colored');
+});
+
+test('long assistant lines wrap at word boundaries with a hanging indent', () => {
+  const out = buffer();
+  out.columns = 30;
+  const ui = createUI({ out, err: out, color: false });
+  ui.streamText('alpha beta gamma delta epsilon zeta eta theta');
+  ui.endStream();
+  const lines = out.text.trimEnd().split('\n');
+  assert.ok(lines.every((l) => l.length < 30), lines.join('|'));
+  assert.ok(lines.slice(1).every((l) => l.startsWith('  ')));
+  assert.equal(lines.map((l) => l.replace(/^● /, '').trim()).join(' '), 'alpha beta gamma delta epsilon zeta eta theta');
+});
+
+test('an edit result shows a numbered diff instead of the raw tool output', () => {
+  const err = buffer();
+  const ui = createUI({ out: err, err, color: false });
+  ui.toolCall({ name: 'edit_file', input: { path: 'src/v.js' } }, { describeCall: (i) => i.path });
+  ui.toolResult({ name: 'edit_file' }, {
+    content: 'edited src/v.js (1 replacement)',
+    isError: false,
+    display: { type: 'diff', path: 'src/v.js', line: 3, oldLines: ['a = 1'], newLines: ['a = 2'], replacements: 1 },
+  });
+  assert.match(err.text, /● Update\(src\/v\.js\)/);
+  assert.match(err.text, /⎿ {2}Updated src\/v\.js \(\+1 -1\)/);
+  assert.match(err.text, /3 -a = 1/);
+  assert.match(err.text, /3 \+a = 2/);
+});
+
+
+test('a chunk ending in newlines keeps them when more text follows', () => {
+  const out = buffer();
+  const ui = createUI({ out, err: out, color: false });
+  ui.streamText('First paragraph.\n\n');
+  ui.streamText('Second.');
+  ui.endStream();
+  assert.equal(out.text, '● First paragraph.\n\n  Second.\n');
 });

@@ -27,6 +27,7 @@ export const DEFAULTS = Object.freeze({
   maxTokens: 8192,
   maxSteps: 40,
   stream: true,
+  idleTimeoutSec: 120, // a model request with no data for this long is dropped and retried
   autoCompact: true,
   compactThreshold: 0.8,
   outputStyle: 'default',
