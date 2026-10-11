@@ -60,7 +60,7 @@ test('setRule accepts a pattern spec and getRules lists it', () => {
   const p = createPermissions({ policy: { read: 'allow', write: 'ask', exec: 'ask' } });
   p.setRule('bash(git status:*)', 'allow');
   assert.equal(p.getRules()['bash(git status:*)'], 'allow');
-  p.setRule('bash(git status:*)', 'ask');
+  p.setRule('bash(git status:*)', 'remove');
   assert.equal(p.getRules()['bash(git status:*)'], undefined);
 });
 

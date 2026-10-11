@@ -43,5 +43,6 @@ export async function readClaudePermissions(home) {
   };
   const allow = convert(perms.allow);
   const deny = convert(perms.deny);
-  return { allow: allow.rules, deny: deny.rules, skipped: allow.skipped + deny.skipped };
+  const ask = convert(perms.ask);
+  return { allow: allow.rules, deny: deny.rules, ask: ask.rules, skipped: allow.skipped + deny.skipped + ask.skipped };
 }

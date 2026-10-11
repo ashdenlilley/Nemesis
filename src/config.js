@@ -41,6 +41,7 @@ export const DEFAULTS = Object.freeze({
   sandbox: 'off', // 'off' | 'strict', see src/sandbox.js
   allowRules: [], // e.g. ["bash(npm test:*)", "web_fetch"]
   denyRules: [], // e.g. ["bash(rm:*)"]
+  askRules: [], // always prompt for these, even under a broader allow
   statusLine: null, // shell command; its first output line replaces the default status line
   autoCompact: true,
   compactThreshold: 0.8,
@@ -71,10 +72,16 @@ async function readJson(file) {
   }
 }
 
+const union = (a = [], b = []) => [...new Set([...a, ...b])];
+
 function mergeLayer(base, layer = {}) {
   return {
     ...base,
     ...layer,
+    // Rule lists add up across layers: a project rule does not replace a user rule.
+    allowRules: union(base.allowRules, layer.allowRules),
+    denyRules: union(base.denyRules, layer.denyRules),
+    askRules: union(base.askRules, layer.askRules),
     permissions: { ...base.permissions, ...layer.permissions },
     mcpServers: { ...base.mcpServers, ...layer.mcpServers },
     hooks: { ...base.hooks, ...layer.hooks },
@@ -146,6 +153,22 @@ export async function loadConfig({ cwd, home = homedir(), env = process.env, ove
   // Local servers that need no key get a placeholder, since the API client insists on one.
   merged.apiKey = profile.keyless ? 'local' : (pick(env[merged.keyEnv], env.NEMESIS_API_KEY) ?? null);
   return merged;
+}
+
+// Adds rules to the project's local config (.nemesis/config.local.json, git-ignored), keeping existing ones.
+export async function addLocalRules(cwd, { allowRules = [], denyRules = [], askRules = [] }) {
+  const file = path.join(cwd, '.nemesis', 'config.local.json');
+  const current = await readJson(file);
+  const next = {
+    ...current,
+    allowRules: union(current.allowRules, allowRules),
+    denyRules: union(current.denyRules, denyRules),
+    askRules: union(current.askRules, askRules),
+  };
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, `${JSON.stringify(next, null, 2)}
+`, 'utf8');
+  return next;
 }
 
 // Merge a patch into the user config file (~/.nemesis/config.json). Profiles merge per provider.

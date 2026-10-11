@@ -84,14 +84,14 @@ export async function runOnboarding({ rl, ui, home, env = process.env, preferred
     if (picked >= 0) await saveUserConfig({ permissions: PERMISSION_PRESETS[picked].policy }, home);
 
     const imported = await readClaudePermissions(home);
-    if (imported && imported.allow.length + imported.deny.length > 0) {
-      const count = imported.allow.length + imported.deny.length;
+    if (imported && imported.allow.length + imported.deny.length + imported.ask.length > 0) {
+      const count = imported.allow.length + imported.deny.length + imported.ask.length;
       const answer = await rl.choose({
         title: `Import ${count} permission rules from ~/.claude/settings.json?${imported.skipped ? ` (${imported.skipped} with no Nemesis equivalent are skipped)` : ''}`,
         options: ['Yes', 'No'],
       });
       if (answer === 0) {
-        await saveUserConfig({ allowRules: imported.allow, denyRules: imported.deny }, home);
+        await saveUserConfig({ allowRules: imported.allow, denyRules: imported.deny, askRules: imported.ask }, home);
         ui.info(`imported ${count} rules`);
       }
     }

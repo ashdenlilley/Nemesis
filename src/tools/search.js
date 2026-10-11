@@ -62,6 +62,7 @@ export const globTool = {
     },
     required: ['pattern'],
   },
+  pathTarget: true,
   describeCall: (input) => input.pattern,
   async run({ pattern, path: base = '.' }, ctx) {
     const root = resolveInWorkspace(ctx.roots ?? ctx.cwd, base);
@@ -95,6 +96,7 @@ export const grepTool = {
     },
     required: ['pattern'],
   },
+  pathTarget: true,
   describeCall: (input) => input.pattern,
   async run({ pattern, path: base = '.', glob, ignore_case: ignoreCase = false }, ctx) {
     let re;

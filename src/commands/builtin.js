@@ -544,12 +544,12 @@ export function builtinCommands() {
     {
       name: 'permissions',
       aliases: ['allowed-tools'],
-      description: 'Show or set per-tool rules: /permissions allow|deny|ask <tool>|reset',
+      description: 'Show or set rules: /permissions allow|deny|ask <rule> | /permissions reset',
       run(args, state) {
         // The rule may contain spaces: /permissions allow bash(npm test:*)
         const [, verb = '', tool = ''] = /^(\S*)\s*(.*)$/.exec(args.trim());
         if (verb === 'reset') {
-          for (const name of Object.keys(state.permissions.getRules())) state.permissions.setRule(name, 'ask');
+          for (const spec of Object.keys(state.permissions.getRules())) state.permissions.setRule(spec, 'remove');
         } else if (['allow', 'deny', 'ask'].includes(verb) && tool) {
           parseRuleSpec(tool);
           state.permissions.setRule(tool, verb);

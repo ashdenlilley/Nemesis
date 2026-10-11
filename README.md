@@ -22,13 +22,13 @@ Do not use `npm install -g nemesis`. The npm registry has an unrelated package w
 On a machine with the repo:
 
 ```sh
-npm pack                                     # writes nemesis-0.10.0.tgz
+npm pack                                     # writes nemesis-0.11.0.tgz
 ```
 
 Send the `.tgz` file to the user. They run:
 
 ```sh
-npm install -g ./nemesis-0.10.0.tgz
+npm install -g ./nemesis-0.11.0.tgz
 nemesis
 ```
 
@@ -199,13 +199,25 @@ A skill is a folder with a `SKILL.md`, in `.nemesis/skills/<name>/` (project) or
 
 ## Permission rules
 
-Rules live in `allowRules` and `denyRules` (config), or in `/permissions allow|deny <rule>`. A rule is a tool name or `tool(pattern)`:
+Rules are kept in `allowRules`, `denyRules` and `askRules` (config), or set with `/permissions allow|deny|ask <rule>`. A rule is a tool name or `tool(pattern)`. Checks run in this order:
 
-- `bash(npm test:*)` allows `npm test` and `npm test -w app`, but not `npm testing`, and never a command that chains on with `;`, `&&`, `|` or `$(`.
-- Any other pattern is a glob where `*` matches anything: `read_file(src/*.ts)`.
-- A matching deny rule beats any allow.
+1. **Deny.** Any matching piece of a command, path or URL denies the call.
+2. **Ask.** Prompts even when a broader allow would apply.
+3. **Allow.** Every piece of a chained command must match.
+4. **Read-only shell commands** (`ls`, `cat`, `grep`, `git status`, `git diff`, ...) run without asking, unless the exec policy is deny. Anything with a redirect or substitution is not read-only.
+5. **Mode policy** for the tool's risk class.
 
-Setup can import the allow and deny lists from `~/.claude/settings.json`. Tools with no Nemesis equivalent are skipped.
+Commands are split at `;`, `&&`, `||`, `|`, newlines, backticks and `$(`, and each piece is checked. So `ls; rm -rf x` is caught by a deny on `bash(rm:*)`.
+
+Patterns:
+
+- `bash(npm test:*)` matches `npm test` and `npm test -w app`, not `npm testing`.
+- File tools match the path relative to the workspace, and the absolute path too. `*` stays inside one folder; `**` crosses folders: `edit_file(src/**)`, `read_file(.env)`.
+- `web_fetch(domain:example.com)` matches the host and its subdomains.
+
+"Yes, and don't ask again" saves the rule to `.nemesis/config.local.json` (git-ignored) for this project. Rule lists add up across user, project and local config. Setup can import the allow, deny and ask lists from `~/.claude/settings.json`.
+
+Modes (Shift+Tab cycles): default, accept edits (file edits allowed, commands ask), plan (read-only; the model calls `exit_plan_mode` with its plan and you approve it before anything changes), bypass (every tool allowed; deny and ask rules still apply).
 
 ## Web
 

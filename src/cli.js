@@ -1,7 +1,7 @@
 import { stdin, stdout, stderr } from 'node:process';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { loadConfig, nemesisHome, OUTPUT_STYLES, PROVIDERS } from './config.js';
+import { addLocalRules, loadConfig, nemesisHome, OUTPUT_STYLES, PROVIDERS } from './config.js';
 import { loadEnvFile } from './env.js';
 import { createProvider } from './providers/index.js';
 import { createBuiltinTools } from './tools/index.js';
@@ -15,6 +15,7 @@ import { createHooks } from './hooks.js';
 import { startMcpServers } from './mcp/manager.js';
 import { createSubagentRunner, createTaskOutputTool, createTaskTool, loadAgentDefs } from './subagents.js';
 import { createSkillTool, loadSkills, skillsPromptSection } from './skills.js';
+import { createPlanTool } from './plan.js';
 import { webTools } from './tools/web.js';
 import { buildUserContent, mentionCompletions } from './attach.js';
 import { appendHistory, appendNote, loadHistory, runStatusLine, shellNote } from './extras.js';
@@ -168,14 +169,19 @@ async function createState({ args, cwd, home, rl, ui }) {
     choose: rl ? (spec) => rl.choose(spec) : null,
     allow: state.config.allowRules ?? [],
     deny: state.config.denyRules ?? [],
+    ask: state.config.askRules ?? [],
+    cwd,
+    // "don't ask again" is saved to this project's local config, so it holds next time.
+    onPersist: (spec) => addLocalRules(cwd, { allowRules: [spec] }),
   });
+  state.planTool = createPlanTool((plan) => approvePlan(state, plan));
   state.hooks = createHooks(state.config, { cwd, getSessionId: () => state.session?.id ?? null });
 
   // Tools every agent gets. Rebuilt when MCP servers change; sub-agents read the current list.
   state.startMcp = async () => {
     state.mcp = await startMcpServers(state.config.mcpServers, { cwd, ui, home });
     state.baseTools = [...createBuiltinTools(), ...webTools, ...createJobTools(state.jobs), ...state.mcp.tools];
-    state.tools = [...state.baseTools, ...(state.taskTools ?? []), ...(state.skillTools ?? [])];
+    rebuildTools(state);
   };
   state.reconnectMcp = async () => {
     await state.mcp?.close().catch(() => {});
@@ -195,7 +201,7 @@ async function createState({ args, cwd, home, rl, ui }) {
     cwd,
   });
   state.taskTools = [createTaskTool(state.subagents), createTaskOutputTool(state.subagents)];
-  state.tools = [...state.baseTools, ...state.taskTools, ...state.skillTools];
+  rebuildTools(state);
 
   state.custom = await loadCustomCommands([path.join(nemesisHome(home), 'commands'), path.join(cwd, '.nemesis', 'commands')]);
   state.registry = createCommandRegistry(state);
@@ -374,6 +380,31 @@ function setPermissionMode(state, mode) {
   else if (mode === 'acceptEdits') policy = { read: 'allow', write: 'allow', exec: 'ask' };
   else policy = effectivePolicy({ config: state.config, planMode: state.planMode, readOnly: state.args.readOnly });
   state.permissions.setPolicy(policy);
+  rebuildTools(state);
+}
+
+// exit_plan_mode is offered only in plan mode.
+function rebuildTools(state) {
+  state.tools = [
+    ...state.baseTools,
+    ...(state.taskTools ?? []),
+    ...(state.skillTools ?? []),
+    ...(state.permissionMode === 'plan' && state.planTool ? [state.planTool] : []),
+  ];
+}
+
+// Shows the plan and asks. Approval leaves plan mode for default permissions.
+async function approvePlan(state, plan) {
+  state.ui.info(plan.trim());
+  if (!state.rl?.choose) return false;
+  const picked = await state.rl.choose({
+    title: 'Approve this plan and leave plan mode?',
+    options: ['Yes, go to default permissions', 'No, keep planning'],
+  });
+  if (picked !== 0) return false;
+  setPermissionMode(state, 'default');
+  refreshFooter(state);
+  return true;
 }
 
 // The prompt bar's footer: accent rule under the box, then a status row with the permission mode,
@@ -529,6 +560,8 @@ async function runRepl(state) {
   ui.info(ui.dim('  /help for commands · Esc or Ctrl+C stops a turn or command · Ctrl+C twice exits'));
 
   rl.setHistory(await loadHistory(state.home));
+  // The bar's top rule is part of the live area, so it stays above the box during turns too.
+  rl.setHeader(`\n${ui.ruleLine()}`); // a blank line keeps the messages above the rule apart from it
   // Up/Down and Ctrl+R use the saved prompts. Ctrl+O expands the last condensed tool run. Ctrl+V attaches a clipboard image.
   const remember = async (text) => {
     rl.addHistory(text);
@@ -548,7 +581,6 @@ async function runRepl(state) {
 
   let leftover = null; // follow-ups not consumed by the last turn; they become the next prompt
   let lastCtrlC = 0;
-  let showRule = true;
   while (!state.exit) {
     let text;
     if (leftover !== null) {
@@ -557,8 +589,6 @@ async function runRepl(state) {
     } else {
       let raw;
       try {
-        if (showRule) ui.rule();
-        showRule = true;
         // The box clears on Enter; the feed shows the prompt.
         raw = await rl.question(ui.prompt(), {
           leave: false,
@@ -567,13 +597,11 @@ async function runRepl(state) {
         });
       } catch (err) {
         if (err.code === 'CANCEL') {
-          showRule = false;
           continue;
         }
         if (err.code === 'INTERRUPT' && Date.now() - lastCtrlC > EXIT_WINDOW_MS) {
           lastCtrlC = Date.now();
           ui.info(ui.dim('  press Ctrl+C again to exit'));
-          showRule = false;
           continue;
         }
         break; // second Ctrl+C, Ctrl+D, or input closed

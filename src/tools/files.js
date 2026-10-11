@@ -25,6 +25,7 @@ export const readFileTool = {
   },
   describeCall: (input) => input.path,
   target: (input) => input.path,
+  pathTarget: true,
   concurrent: true,
   async run({ path: p, offset = 1, limit = DEFAULT_LINE_LIMIT }, ctx) {
     const abs = resolveInWorkspace(ctx.roots ?? ctx.cwd, p);
@@ -53,6 +54,7 @@ export const writeFileTool = {
   },
   describeCall: (input) => input.path,
   target: (input) => input.path,
+  pathTarget: true,
   async run({ path: p, content }, ctx) {
     const abs = resolveInWorkspace(ctx.roots ?? ctx.cwd, p);
     await ctx.checkpoint?.(abs);
@@ -82,6 +84,7 @@ export const editFileTool = {
   },
   describeCall: (input) => input.path,
   target: (input) => input.path,
+  pathTarget: true,
   async run({ path: p, old_string: oldStr, new_string: newStr, replace_all: all = false }, ctx) {
     if (oldStr === newStr) throw new Error('old_string and new_string are identical');
     if (oldStr === '') throw new Error('old_string must not be empty');

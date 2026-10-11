@@ -219,6 +219,8 @@ export function createLineReader({ input = process.stdin, output = process.stdou
   let draft = null; // editor state of a watch box that closed with unsent text
   let status = null; // line drawn above the live area while a turn runs
   let footer = null; // text drawn below the live area (a status line)
+  let header = null; // text drawn above the prompt box (the top rule of the bar)
+  const menuQueue = []; // choose() requests waiting for the open menu to close
   let history = []; // submitted prompts, oldest first
   const keyHandlers = new Map(); // key sequence -> fn, active while a box is up
   const sigint = [];
@@ -304,10 +306,11 @@ export function createLineReader({ input = process.stdin, output = process.stdou
     const s = surface();
     // Footer lines are styled by the caller (the prompt bar's bottom rule and status row).
     const foot = footer ? footer.split('\n') : [];
-    if (!s) return status || foot.length ? { lines: [...(status ? [status] : []), ...foot], row: 0, col: 0, below: foot.length } : null;
+    const head = [...(status ? [status] : []), ...(header ? header.split('\n') : [])];
+    // Without a box the cursor rests on the last header line (or the first footer line when there is no header).
+    if (!s) return head.length || foot.length ? { lines: [...head, ...foot], row: Math.max(0, head.length - 1), col: 0, below: foot.length } : null;
     const v = render(s);
-    const top = status ? [status] : [];
-    return { ...v, lines: [...top, ...v.lines, ...foot], row: v.row + top.length, below: v.below + foot.length };
+    return { ...v, lines: [...head, ...v.lines, ...foot], row: v.row + head.length, below: v.below + foot.length };
   }
 
   // Clear the live area, write `text` in its place, then draw the current surface below it.
@@ -393,12 +396,24 @@ export function createLineReader({ input = process.stdin, output = process.stdou
     else l.resolve(text);
   }
 
+  // Menus run one at a time. A request that comes while one is open waits its turn.
+  function openMenu(req) {
+    menu = { title: req.title, options: req.options, index: 0, resolve: req.resolve };
+    paint();
+    updateMode();
+  }
+
   function settleMenu(index) {
     const m = menu;
     menu = null;
-    paint();
     m.resolve(index);
-    replayPending();
+    const next = menuQueue.shift();
+    if (next) openMenu(next);
+    else {
+      paint();
+      updateMode();
+      replayPending();
+    }
   }
 
   function menuKey(chunk) {
@@ -559,10 +574,16 @@ export function createLineReader({ input = process.stdin, output = process.stdou
       if (!input.isTTY) return Promise.reject(new Error('choices need a terminal'));
       if (closed) return Promise.reject(eofError());
       return new Promise((resolve) => {
-        menu = { title, options, index: 0, resolve };
-        paint();
-        updateMode();
+        const req = { title, options, resolve };
+        if (menu) menuQueue.push(req);
+        else openMenu(req);
       });
+    },
+
+    // The rule drawn above the prompt box, and the line under the status row. null removes it.
+    setHeader(text) {
+      header = text || null;
+      if (input.isTTY && !closed) paint();
     },
 
     // Keeps a prompt box up while a turn runs. Enter calls onSubmit(text); Ctrl+C on an empty box calls onInterrupt().
