@@ -1,3 +1,8 @@
 node_modules/
 .nemesis/sessions/
 .nemesis/config.local.json
+android/local.properties
+android/.gradle/
+android/build/
+android/app/build/
+android/app/src/main/jniLibs/
