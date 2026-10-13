@@ -46,6 +46,7 @@ export const DEFAULTS = Object.freeze({
   autoCompact: true,
   compactThreshold: 0.8,
   outputStyle: 'default',
+  turnRecap: true, // the ✻ Nms'd line after each turn; /config recap off hides it
   // Policy per tool risk class: 'allow' | 'ask' | 'deny'
   permissions: { read: 'allow', write: 'ask', exec: 'ask' },
   mcpServers: {},

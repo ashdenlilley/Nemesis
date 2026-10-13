@@ -232,7 +232,7 @@ const STALE_SECS = 20; // waiting this long on the model with no data shows a wa
 const formatSecs = (s) => (s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`);
 const formatTokens = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 
-// Animated status line above the prompt box while a turn runs: ✻ Nms-ing… (12s · esc to interrupt).
+// Animated status line above the prompt box while a turn runs: ✻ Nms-ing… (12s).
 // Turns yellow with a warning when the model has sent nothing for STALE_SECS.
 function startSpinner(rl, ui) {
   const started = Date.now();
@@ -248,7 +248,7 @@ function startSpinner(rl, ui) {
     if (!warning && phase === 'model' && idle >= STALE_SECS) warning = `no response from the model for ${formatSecs(idle)}`;
     const icon = SPINNER[frame++ % SPINNER.length];
     const head = warning ? ui.yellow(`${icon} Nms-ing…`) : ui.accent(`${icon} Nms-ing…`);
-    const tail = ui.dim(`(${formatSecs(secs)} · esc to interrupt)`);
+    const tail = ui.dim(`(${formatSecs(secs)})`);
     rl.setStatus(`${head} ${tail}${warning ? ` ${ui.yellow(warning)}` : ''}`);
   };
   draw();
@@ -374,7 +374,7 @@ async function runUserTurn(state, text, progress = null) {
     state.controller = null;
     state.sendNow = false;
     const elapsed = progress?.stop() ?? null;
-    state.ui.status(statusLine(state, elapsed));
+    if (state.config.turnRecap) state.ui.status(statusLine(state, elapsed));
   }
 }
 

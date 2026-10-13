@@ -140,8 +140,16 @@ export function builtinCommands() {
     {
       name: 'config',
       aliases: ['settings'],
-      description: 'Show effective configuration',
-      run(_args, state) {
+      description: 'Show effective configuration; /config recap on|off',
+      async run(args, state) {
+        const [key, value] = args.trim().split(/s+/);
+        if (key === 'recap') {
+          if (value !== 'on' && value !== 'off') throw new Error('usage: /config recap on|off');
+          state.config.turnRecap = value === 'on';
+          await saveUserConfig({ turnRecap: state.config.turnRecap }, state.home);
+          state.ui.info(`recap ${value}`);
+          return;
+        }
         const shown = { ...state.config, apiKey: state.config.apiKey ? '(set)' : '(unset)' };
         state.ui.info(JSON.stringify(shown, null, 2));
       },

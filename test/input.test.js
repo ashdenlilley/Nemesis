@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
-import { applyInput, layout, viewport, createLineReader, MAX_INPUT_ROWS } from '../src/input.js';
+import { applyInput, layout, viewport, createLineReader, fitColumns, MAX_INPUT_ROWS } from '../src/input.js';
 
 const blank = () => ({ text: '', cur: 0, top: 0, pasting: false });
 const type = (st, s) => applyInput(st, s);
@@ -267,4 +267,11 @@ test('question: Esc clears typed text, then cancels; Ctrl+C on an empty box reje
   const second = reader.question('> ');
   term.input.write('\x03');
   await assert.rejects(second, (err) => err.code === 'INTERRUPT');
+});
+
+test('fitColumns clips visible text, keeps escape codes, and resets styling after a cut', () => {
+  assert.equal(fitColumns('short', 10), 'short');
+  assert.equal(fitColumns('abcdefgh', 4), 'abcd\x1b[0m');
+  assert.equal(fitColumns('\x1b[1mabcdefgh\x1b[0m', 3), '\x1b[1mabc\x1b[0m');
+  assert.equal(fitColumns('\x1b[2mab\x1b[0m', 2), '\x1b[2mab\x1b[0m');
 });

@@ -1,8 +1,12 @@
+import { appendFileSync } from 'node:fs';
+
 // Multi-line prompt editor for the REPL and setup questions. Enter submits. Ctrl+J, Alt+Enter, and
 // Shift+Enter (where the terminal sends it) insert a newline. Pasted text goes in as one block.
 // The box grows with its content up to MAX_INPUT_ROWS, then scrolls with the cursor.
 
 export const MAX_INPUT_ROWS = 8;
+// NEMESIS_TTY_LOG=<file>: append one JSON line per redraw (state before, text, bytes written) for debugging.
+const TTY_LOG = process.env.NEMESIS_TTY_LOG;
 export const MAX_SUGGESTIONS = 6;
 
 const PASTE_START = '\x1b[200~';
@@ -179,6 +183,30 @@ function advance(start, s) {
   }
   return col;
 }
+// `s` cut to at most `max` visible columns; escape codes take no columns. A line that wraps would add
+// rows the redraw does not count, so the live area is clipped instead.
+export function fitColumns(s, max) {
+  let out = '';
+  let col = 0;
+  let clipped = false;
+  for (let i = 0; i < s.length; ) {
+    const esc = s.slice(i).match(/^\x1b\[[0-9;?]*[ -/]*[@-~]/);
+    if (esc) {
+      out += esc[0];
+      i += esc[0].length;
+      continue;
+    }
+    const ch = String.fromCodePoint(s.codePointAt(i));
+    if (col >= max) {
+      clipped = true;
+      break;
+    }
+    out += ch;
+    col++;
+    i += ch.length;
+  }
+  return clipped ? `${out}\x1b[0m` : s;
+}
 const eofError = () => Object.assign(new Error('input closed'), { code: 'EOF' });
 // A question cancelled by a key: code 'INTERRUPT' for Ctrl+C, 'CANCEL' for Esc.
 const cancelError = (code) => Object.assign(new Error('cancelled'), { code });
@@ -315,6 +343,7 @@ export function createLineReader({ input = process.stdin, output = process.stdou
 
   // Clear the live area, write `text` in its place, then draw the current surface below it.
   function paint(text = '') {
+    const before = { row: shown?.row ?? null, partial: shown?.partial ?? null, tailCols, cols: cols() };
     let buf = '';
     if (shown) {
       buf += `\r${shown.row ? `\x1b[${shown.row}A` : ''}\x1b[J`;
@@ -339,11 +368,13 @@ export function createLineReader({ input = process.stdin, output = process.stdou
       // Mid-line text: step to a fresh line for the area.
       const partial = !atLineStart;
       if (partial) buf += '\r\n';
-      buf += v.lines.join('\r\n');
+      // Every row must fit on one terminal line, or the cursor-up count below comes out short.
+      buf += v.lines.map((l) => fitColumns(l, cols() - 1)).join('\r\n');
       if (v.below) buf += `\x1b[${v.below}A`;
       buf += `\r${v.col ? `\x1b[${v.col}C` : ''}`;
       shown = { row: v.row, partial };
     }
+    if (TTY_LOG) appendFileSync(TTY_LOG, JSON.stringify({ t: Date.now(), before, text, buf, after: { row: shown?.row ?? null, partial: shown?.partial ?? null, tailCols } }) + '\n');
     output.write(buf);
   }
 
