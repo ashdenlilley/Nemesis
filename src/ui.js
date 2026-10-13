@@ -210,14 +210,20 @@ export function createUI({ out = process.stdout, err = process.stderr, color, de
       };
       // The ghost sits beside the four info lines, between the logo and the text.
       const ghostRow = (i) => (GHOST[i] ? `${paintWith(accent, GHOST[i])}  ` : ' '.repeat(ghostW + 2));
-      const logoCols = width() >= 90 ? 52 : 34;
+      const logoCols = width() >= 90 ? 52 : Math.min(34, width());
       const logo = logoLines(logoCols);
       if (!logo) {
         info.forEach((item, i) => err.write(`${ghostRow(i)}${infoText(item, width() - ghostW - 2)}\n`));
         return;
       }
-      const top = Math.max(0, Math.floor((logo.length - info.length) / 2));
       const room = width() - logoCols - 3 - ghostW - 2;
+      if (room < 24) {
+        // Phone-width terminals: no room beside the logo, so the info lines go underneath it.
+        for (const row of logo) err.write(`${paintWith(accent, row.trimEnd())}\n`);
+        info.forEach((item) => err.write(`  ${infoText(item, width() - 2)}\n`));
+        return;
+      }
+      const top = Math.max(0, Math.floor((logo.length - info.length) / 2));
       for (let r = 0; r < logo.length; r++) {
         const i = r - top;
         const item = info[i];

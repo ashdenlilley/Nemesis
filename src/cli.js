@@ -430,7 +430,7 @@ function drawFooter(state, custom = null) {
   const { ui } = state;
   const mode = state.args.readOnly
     ? ui.dim('read-only')
-    : `${ui.accent('⏵⏵')} ${MODE_TEXT[state.permissionMode] ?? MODE_TEXT.default} ${ui.dim('(shift+tab to cycle)')}`;
+    : `${ui.accent('>>')} ${MODE_TEXT[state.permissionMode] ?? MODE_TEXT.default} ${ui.dim('(shift+tab to cycle)')}`;
   const model = ui.dim(`${state.config.profile} · ${state.config.model}`);
   const hints = ui.dim('/help · esc stops a turn');
   // The row must fit on one line: a wrapped footer breaks the redraw. Drop the least important parts first.

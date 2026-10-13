@@ -137,3 +137,16 @@ test('rule and shaded rows use the full window width, not a fixed cap', () => {
   ui.rule();
   assert.equal(out.text.trim().length, 159);
 });
+
+test('banner on a phone-width terminal stacks the info lines under the logo', () => {
+  const err = buffer();
+  err.columns = 45;
+  createUI({ out: buffer(), err, color: false }).banner({
+    version: '0.12.0', provider: 'openai', model: 'gpt-4o', cwd: '/data/data/com.termux/files/home/Nemesis', session: '2026',
+  });
+  const lines = err.text.trimEnd().split('\n');
+  assert.ok(lines.every((l) => l.length <= 44), lines.join('\n'));
+  const titleAt = lines.findIndex((l) => l.includes('Nemesis 0.12.0'));
+  const modelAt = lines.findIndex((l) => l.includes('openai/gpt-4o'));
+  assert.ok(titleAt > 0 && modelAt > titleAt, 'info lines come after the logo, not beside it');
+});
