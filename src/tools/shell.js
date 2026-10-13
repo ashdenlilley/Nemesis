@@ -6,13 +6,13 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
 const MAX_OUTPUT_BYTES = 100_000;
 
-// PowerShell on Windows, POSIX sh elsewhere.
+// PowerShell on Windows, POSIX sh elsewhere. Termux (platform 'android') has no /bin/sh, so it resolves sh via PATH.
 export function shellInvocation(command, platform = process.platform) {
   if (platform === 'win32') {
     // -Command does not propagate native exit codes by itself; re-exit with $LASTEXITCODE.
     return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', `${command}; exit $LASTEXITCODE`] };
   }
-  return { file: '/bin/sh', args: ['-c', command] };
+  return { file: platform === 'android' ? 'sh' : '/bin/sh', args: ['-c', command] };
 }
 
 export function runCommand(command, { cwd, timeoutMs = DEFAULT_TIMEOUT_MS, signal, platform, env } = {}) {

@@ -49,6 +49,18 @@ The first run asks whether to add the npm global bin directory to PATH (Windows:
 
 Re-run key and PATH setup at any time with `nemesis --setup`.
 
+#### Termux (Android, including GrapheneOS)
+
+Install Termux from F-Droid (the Play Store build is out of date), then:
+
+```sh
+pkg install nodejs git                          # Node 20+ and git for the GitHub install
+npm install -g github:ashdenlilley/Nemesis
+nemesis
+```
+
+The launcher goes in `$PREFIX/bin`, and the first run offers to add it to `~/.bashrc`. The bash tool runs through `sh` on the Termux PATH, and MCP OAuth (`/mcp`) opens the browser with `termux-open-url` (install `termux-tools` if it is missing). Clipboard images are not supported on Termux, so `/paste` reports that no clipboard tool is available.
+
 From a local clone, use `npm link` instead of the GitHub install, or run `node bin/nemesis.js`.
 
 ```sh

@@ -129,10 +129,16 @@ export function tokenSource({ name, home, fetchImpl = fetch }) {
   };
 }
 
+// Termux (platform 'android') ships termux-open-url instead of xdg-open.
+export function browserCommand(url, platform = process.platform) {
+  if (platform === 'win32') return ['cmd', ['/c', 'start', '""', url]];
+  if (platform === 'darwin') return ['open', [url]];
+  if (platform === 'android') return ['termux-open-url', [url]];
+  return ['xdg-open', [url]];
+}
+
 export function openBrowser(url) {
-  const [file, args] = process.platform === 'win32'
-    ? ['cmd', ['/c', 'start', '""', url]]
-    : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
+  const [file, args] = browserCommand(url);
   spawn(file, args, { stdio: 'ignore', detached: true, windowsHide: true }).on('error', () => {}).unref();
 }
 
